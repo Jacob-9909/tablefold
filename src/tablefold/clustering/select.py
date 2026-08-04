@@ -104,7 +104,7 @@ class SelectionPolicy:
 
 @dataclass(frozen=True)
 class Candidate:
-    """One table, priced and measured as a potential anchor."""
+    """잠재적 앵커 후보 테이블 및 그 비용/도달범위 데이터."""
 
     name: str
     role: str
@@ -119,7 +119,9 @@ class Candidate:
 
 @dataclass(frozen=True)
 class CandidateLattice:
-    """Every anchor that could be chosen, with what choosing it would buy."""
+    """선택 가능한 모든 앵커 및 해당 앵커 선택 시 얻게 되는
+    이점/비용 정보의 후보 격자.
+    """
 
     candidates: tuple[Candidate, ...]
     total_table_count: int
@@ -133,12 +135,7 @@ class CandidateLattice:
         return len(found.reach - covered) if found else 0
 
     def render(self, *, limit: int = 40, members: int = 12) -> str:
-        """The lattice as a table, sized for a prompt.
-
-        Members are listed because they are the whole basis for a semantic
-        call — an anchor's name says little, but "absorbs invoices, payments,
-        refunds" says what the model would be about.
-        """
+        """프롬프트에 포함하기 적절한 표 형식 텍스트로 격자를 렌더링합니다."""
         ranked = sorted(self.candidates, key=lambda c: (-len(c.reach), c.name))[:limit]
 
         lines = [
@@ -198,11 +195,7 @@ class Selector(Protocol):
 
 
 class GreedySelector:
-    """Minimum set cover, solved greedily, with two admission rules.
-
-    Greedy set cover is the standard ``ln n`` approximation. That bound is ample
-    here, where the alternative is a human guessing at subject areas.
-    """
+    """탐욕적 최대 커버리지(Greedy Maximum Coverage) 알고리즘으로 앵커를 선택합니다."""
 
     def select(self, lattice: CandidateLattice, policy: SelectionPolicy) -> Selection:
         if not lattice.candidates:

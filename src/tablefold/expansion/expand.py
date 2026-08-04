@@ -1,21 +1,21 @@
-"""Expand SQL written against logical models into SQL the database can run.
+"""논리 모델(Logical Model)을 타깃으로 작성된 SQL을
+실제 데이터베이스에서 실행 가능한 SQL로 확장(Expand/Rewrite)합니다.
 
-A query names a wide model and its fields; this turns that into a CTE built
-from the physical tables and rewrites the query to select from it. The folding
-direction is `compose`; this is the way back.
+쿼리가 와이드 모델 및 해당 필드를 참조하면, 이를 물리 테이블로 재구성하는
+CTE(Common Table Expression)를 생성하고 해당 CTE를 조회하도록 SQL 쿼리를
+다시 작성(Rewrite)합니다.
 
-Two properties matter more than anything else here.
+핵심 원칙 2가지:
 
-**Grain is preserved.** Many-to-one joins are inlined directly, because at most
-one row can match. One-to-many children are *never* inlined — they are grouped
-in a subquery first and joined on the key. Inlining a child instead would
-multiply the anchor's rows, and every ``SUM`` in the query would come back
-inflated with no error raised. That failure is silent, which is what makes it
-worth the extra machinery.
+**1. 데이터 입도(Grain) 보존**: N:1 조인은 직접 인라인 조인됩니다.
+1:N 자식 테이블은 *절대* 직접 인라인 조인되지 않고, 서브쿼리에서 먼저
+`GROUP BY`로 선집계(Pre-aggregation)한 후 조인됩니다.
+자식 테이블을 직접 조인할 경우 부모 행 수가 뻥튀기되어
+모든 집계 연산(SUM 등)이 오염되는 심각한 오류가 발생하기 때문입니다.
 
-**Only what is asked for is built.** A model may fold fifteen tables, but a
-query touching three of its fields expands to the two or three joins those
-fields need. The unused joins are not emitted, so the planner never sees them.
+**2. 필요한 조인만 생성 (Join Pruning)**: 논리 모델이 15개 테이블을
+포함하더라도, 쿼리가 그중 3개 필드만 사용하면 해당 3개 필드에 필요한
+최소한의 조인 구문만 CTE 내에 생성하여 방출합니다.
 """
 
 from __future__ import annotations
@@ -69,7 +69,9 @@ def expand(
     dialect: str = "postgres",
     pretty: bool = True,
 ) -> ExpansionResult:
-    """Rewrite *sql* so it runs against physical tables."""
+    """논리 모델을 참조하는 *sql*을
+    실제 물리 테이블 대상 구문으로 다시 재작성(Expand)합니다.
+    """
     try:
         statement = sqlglot.parse_one(sql, read=dialect)
     except Exception as exc:  # noqa: BLE001 - surfaced as a domain error

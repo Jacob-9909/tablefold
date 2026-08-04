@@ -23,17 +23,27 @@ from tablefold.schema.ir import PhysicalColumn, PhysicalTable
 # Columns that carry no business meaning at any grain.
 NOISE_SUFFIXES = ("_hash", "_token", "_secret", "_password", "_salt")
 
-# Aggregates emitted per numeric child column, in order of usefulness.
-NUMERIC_AGGREGATES = ("sum", "avg")
+# 자식 숫자형 컬럼 하나당 방출되는 집계 목록.
+#
+# `avg`는 의도적으로 뺐다. 모든 모델이 `<child>_count`를 갖고 있으므로 평균은
+# `sum / count`로 계산된다 — 컨텍스트를 쓰면서 표현 가능한 질문은 하나도 늘리지
+# 못하는 필드다. retail 픽스처에서 avg는 188개 필드 중 34개, 렌더된 레이어의
+# 16%를 차지했다. `expand`는 여전히 avg를 지원하므로 필요한 레이어는 명시하면 된다.
+NUMERIC_AGGREGATES = ("sum",)
 
-# Cap on numeric columns aggregated from any single child, so one wide child
-# table cannot crowd out every other field in the model.
+# 자식 테이블 하나에서 집계할 숫자 컬럼 상한. 넓은 자식 테이블 하나가
+# 모델의 다른 필드를 전부 밀어내지 못하게 한다.
 MAX_AGGREGATED_COLUMNS_PER_CHILD = 3
 
-# Field cap a model is composed under. Selection prices against the same cap,
-# because a candidate whose fields would be trimmed does not actually cost what
-# its raw column count suggests.
-DEFAULT_MAX_FIELDS = 64
+# 서로 다른 두 값. 이전에는 하나의 이름과 기본값을 공유했다.
+#
+# MAX_MODEL_FIELDS — 모델 *하나*의 상한. 선택 단계가 후보 가격을 매기는 기준이다.
+#   잘려나갈 필드를 가진 후보는 원본 컬럼 수만큼 비싸지 않기 때문이다.
+# DEFAULT_FIELD_BUDGET — *레이어 전체*가 쓸 수 있는 예산. 한 번에 읽히는 단위가
+#   레이어이므로 실제로 의미 있는 값은 이쪽이다. 모델별 한도만으로는 한 모델이
+#   천장에 부딪히는 동안 다른 모델이 같은 크기의 몫을 86% 남기는 걸 막을 수 없다.
+MAX_MODEL_FIELDS = 64
+DEFAULT_FIELD_BUDGET = 200
 
 
 def is_noise(column_name: str) -> bool:
@@ -82,7 +92,7 @@ def estimate_fields(
     anchor: str,
     *,
     max_hops: int,
-    max_fields: int = DEFAULT_MAX_FIELDS,
+    cap: int = MAX_MODEL_FIELDS,
 ) -> int:
     """Fields a model anchored on *anchor* would carry.
 
@@ -104,9 +114,9 @@ def estimate_fields(
     for child, _ in graph.children(anchor):
         child_table = graph.schema.table(child)
         if child_table is not None:
-            # One COUNT, plus SUM and AVG over each aggregatable column.
+            # COUNT 하나, 그리고 집계 가능한 컬럼마다 집계 하나씩.
             total += 1 + len(aggregatable_columns(child_table, graph)) * len(
                 NUMERIC_AGGREGATES
             )
 
-    return min(total, max_fields)
+    return min(total, cap)

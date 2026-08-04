@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from tablefold.graph import SchemaGraph, infer_foreign_keys
-from tablefold.ir import Cardinality
+from tablefold.ir import Cardinality, name_aliases, singular
 
 
 def test_degrees_follow_key_direction(tiny_graph):
@@ -45,24 +47,6 @@ def test_children_are_one_to_many(tiny_graph):
     assert step.cardinality is Cardinality.ONE_TO_MANY
     assert step.from_columns == ("id",)
     assert step.to_columns == ("order_id",)
-
-
-def test_shortest_path_ignores_direction(tiny_graph):
-    assert tiny_graph.shortest_path("orders", "orders") == 0
-    assert tiny_graph.shortest_path("orders", "tiers") == 2
-    assert tiny_graph.shortest_path("order_items", "tiers") == 3
-
-
-def test_components_separate_islands(tiny_schema):
-    from tablefold.ir import PhysicalTable
-
-    orphan = PhysicalTable(name="audit", columns=(tiny_schema.tables[0].columns[0],))
-    schema = replace(tiny_schema, tables=(*tiny_schema.tables, orphan))
-    graph = SchemaGraph.build(schema)
-
-    components = graph.components()
-    assert len(components) == 2
-    assert frozenset({"audit"}) in components
 
 
 # ── inference ─────────────────────────────────────────────────────────────────
@@ -119,3 +103,38 @@ def test_inference_requires_a_compatible_type(tiny_schema):
     schema = replace(tiny_schema, tables=(orders, tiers), foreign_keys=())
 
     assert infer_foreign_keys(schema) == ()
+
+
+# ── naming ────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("plural_name", "expected"),
+    [
+        ("orders", "order"),
+        ("countries", "country"),
+        ("companies", "company"),
+        ("addresses", "address"),
+        ("batches", "batch"),
+        ("boxes", "box"),
+        ("statuses", "status"),
+        ("tax_rates", "tax_rate"),
+        # Not plurals. `singular` used to strip these to `statu` / `addres`,
+        # and the two copies of this logic disagreed about which.
+        ("status", "status"),
+        ("address", "address"),
+        ("analysis", "analysis"),
+    ],
+)
+def test_singular_handles_the_endings_that_used_to_diverge(plural_name, expected):
+    assert singular(plural_name) == expected
+
+
+def test_inference_and_field_prefixes_agree_on_one_spelling(retail_schema):
+    """The two callers must strip a table name the same way.
+
+    They were separate helpers with different rules, so `addresses` reached
+    foreign-key inference as `address` and field naming as `addresse`.
+    """
+    for table in retail_schema.tables:
+        assert singular(table.name) in name_aliases(table.name)

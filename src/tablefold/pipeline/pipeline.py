@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tablefold.scoring.classify import TableProfile, profile_tables
 from tablefold.clustering.cluster import Clustering, cluster
+from tablefold.clustering.select import SelectionPolicy, Selector
 from tablefold.composition.compose import ComposeOptions, compose
 from tablefold.graph.graph import SchemaGraph, infer_foreign_keys
+from tablefold.presentation.cost import DEFAULT_FIELD_BUDGET
 from tablefold.schema.ir import LogicalLayer, PhysicalSchema
-from tablefold.clustering.select import SelectionPolicy, Selector
+from tablefold.scoring.classify import TableProfile, profile_tables
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,20 @@ class FoldResult:
     layer: LogicalLayer
     inferred_foreign_keys: int
 
+    @property
+    def tier1_covered_tables(self) -> set[str]:
+        covered: set[str] = set()
+        for model in self.layer.models:
+            covered.add(model.base_table.lower())
+            for t in model.absorbed_tables:
+                covered.add(t.lower())
+        return covered
+
+    @property
+    def tier2_edge_tables(self) -> tuple[object, ...]:
+        covered = self.tier1_covered_tables
+        return tuple(t for t in self.schema.tables if t.name.lower() not in covered)
+
 
 def fold(
     schema: PhysicalSchema,
@@ -32,7 +47,7 @@ def fold(
     policy: SelectionPolicy | None = None,
     selector: Selector | None = None,
     max_hops: int = 3,
-    max_fields: int = 64,
+    field_budget: int = DEFAULT_FIELD_BUDGET,
     infer_missing_keys: bool = True,
     include_aggregates: bool = True,
 ) -> FoldResult:
@@ -64,14 +79,13 @@ def fold(
         policy=policy,
         selector=selector,
         max_hops=max_hops,
-        max_fields=max_fields,
     )
     layer = compose(
         graph,
         clustering,
         options=ComposeOptions(
             max_hops=max_hops,
-            max_fields=max_fields,
+            field_budget=field_budget,
             include_aggregates=include_aggregates,
         ),
     )

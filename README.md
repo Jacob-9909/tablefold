@@ -1,239 +1,129 @@
 # tablefold
 
-Fold a wide physical schema into a handful of wide logical models an LLM can
-read in one shot — then expand SQL written against those models back into SQL
-the database can run.
+> 방대한 물리 데이터베이스 스키마를 LLM이 한눈에 이해할 수 있는 소수의 **와이드 논리 모델(Wide Logical Models)**로 접고(Fold), 작성된 쿼리를 실제 실행 가능한 물리 SQL로 다시 펼쳐주는(Expand) 도구입니다.
 
 ```
-53 physical tables  ──fold──>  7 logical models  (~3k tokens)
-                    <─expand──  SQL that actually runs
+53개 물리 테이블  ──fold(접기)──>  7개 논리 모델 (~3k 토큰)
+                   <─expand(펼치기)──  실제 실행되는 SQL
 ```
 
-The model count is an output, not a setting. You state how much of the schema
-you want covered and what a model has to earn to justify its tokens; the fold
-reports how many that took and why it stopped.
+---
 
-## The problem
+## 💡 왜 tablefold인가요?
 
-Text-to-SQL over a real database fails on context, not on reasoning. Fifty
-tables of DDL is tens of thousands of tokens of mostly-irrelevant structure,
-and the model has to rediscover every join path from foreign keys each time it
-is asked anything.
+실제 DB 대상 Text-to-SQL이 실패하는 주요 원인은 LLM의 추론 능력 부족이 아닌 **과도한 DDL 문맥(Context)과 복잡한 조인 관계** 때문입니다.
 
-Handing it four wide models instead — `orders`, `products`, `customers`,
-`shipments`, each already carrying its related attributes as flat fields — is a
-smaller and better-shaped problem. `SELECT customer_tier_label, SUM(grand_total)
-FROM orders GROUP BY 1` needs no join reasoning at all.
+`tablefold`는 연관된 테이블을 하나의 와이드 모델(`orders`, `products` 등)로 합쳐주어 LLM이 조인 추론 없이 한 번에 쿼리를 작성할 수 있게 돕고, 생성된 쿼리는 데이터 왜곡 없이 안전한 물리 SQL로 자동 변환합니다.
 
-The catch is that those models have to be *real*: something has to turn that
-query back into the four-way join it stands for, without breaking the
-arithmetic.
+---
 
-## What it does
+## ⚡ 빠른 시작 (Quick Start)
 
-**Fold.** Read the physical schema, build the foreign-key graph, score each
-table on how fact-like it is, then pick anchors by greedy maximum coverage and
-compose one wide model per anchor.
-
-**Expand.** Rewrite SQL written against a model into a CTE over the physical
-tables — emitting only the joins the query's fields actually need.
-
-Both directions are deterministic. No model in the loop, so the same schema
-always folds the same way and a surprising result is four numbers you can read
-off the table.
-
-## Install
+### 1. 설치
 
 ```bash
-uv sync                          # or: pip install -e .
-uv sync --extra postgres         # to introspect a live database
+uv sync                          # 기본 설치
+uv sync --extra postgres         # PostgreSQL 연동 지원
 ```
 
-## Use
+### 2. 사용법
 
 ```bash
-# what the fold produced
+# 1. 물리 스키마를 논리 모델로 접기
 tablefold fold --ddl fixtures/retail_50.sql
 
-# 53 tables -> 7 models (7.6:1), 44 covered (83%)
-# stopped: no table left brings enough new ones — lower --min-gain or raise
-#          --max-hops for more coverage
-#
-#   orders          64 fields (base 12, joined 23, agg 29)  absorbs 16 tables
-#   products        54 fields (base  8, joined  8, agg 38)  absorbs 16 tables
-#   customers       32 fields (base  7, joined  5, agg 20)  absorbs 13 tables
-#   shipments       48 fields (base  6, joined 39, agg  3)  absorbs 13 tables
-#   payments        44 fields (base  5, joined 36, agg  3)  absorbs 11 tables
-#   campaigns       12 fields (base  5, joined  2, agg  5)  absorbs  5 tables
-#   invoice_lines   39 fields (base  3, joined 36, agg  0)  absorbs 10 tables
-#
-#   9 tables uncovered
+# 2. LLM 전달용 프롬프트 메타데이터 출력
+tablefold context --ddl fixtures/retail_50.sql --field-budget 120
 
-# every table in a model, at the cost of more of them
-tablefold fold --ddl fixtures/retail_50.sql --coverage 1.0 --min-gain 1
-# 53 tables -> 16 models (3.3:1), 53 covered (100%)
-
-# the other direction: pay for a model only if it brings three new tables
-tablefold fold --ddl fixtures/retail_50.sql --min-gain 3
-# 53 tables -> 4 models (13.2:1), 38 covered (72%)
-
-# the prompt-sized rendering
-tablefold context --ddl fixtures/retail_50.sql --max-fields 30
-
-# why those anchors
-tablefold inspect --ddl fixtures/retail_50.sql
-
-# logical SQL -> physical SQL
-tablefold expand "SELECT customer_tier_label, SUM(grand_total) AS revenue
-                  FROM orders GROUP BY customer_tier_label" \
+# 3. 논리 SQL을 실행 가능한 물리 SQL로 변환 (필요한 조인만 자동 추림)
+tablefold expand "SELECT customer_tier_label, SUM(grand_total) FROM orders GROUP BY 1" \
     --ddl fixtures/retail_50.sql
-
-# against a live database
-tablefold fold --dsn "postgresql://user@host:5432/db" --schema public -f yaml -o layer.yaml
 ```
 
-From Python:
+#### Python API 사용 예시
 
 ```python
 from tablefold.introspect.ddl import DDLIntrospector
 from tablefold.pipeline import fold
 from tablefold.expand import expand
 
-result = fold(DDLIntrospector.from_path("schema.sql").introspect())
-print(len(result.layer.models), result.layer.coverage, result.layer.stop_reason)
+# 스키마 분석 및 논리 모델 구성
+schema = DDLIntrospector.from_path("schema.sql").introspect()
+result = fold(schema)
 
+# 쿼리 변환
 expansion = expand("SELECT SUM(grand_total) FROM orders", result.layer, result.graph)
-print(expansion.sql, expansion.joins_pruned)
+print(expansion.sql)
 ```
 
-## How the fold works
+---
 
-**1. Introspect.** DDL script (sqlglot) or live PostgreSQL (`pg_catalog`). Both
-produce the same `PhysicalSchema`.
+## 🔄 파이프라인 다이어그램 및 단계별 로직 (Pipeline Architecture)
 
-**2. Recover missing keys.** Restored backups usually arrive with every
-constraint stripped, and no foreign keys means no graph means no fold. Columns
-whose names strip to a known table (`customer_id` → `customers`) and whose types
-match that table's key are wired back up and flagged `inferred`. On the
-53-table fixture with all constraints removed, over 75% of the real edges come
-back.
+`tablefold`는 물리 스키마를 수집하는 단계부터 최종 물리 SQL로 변환하기까지 5단계의 명확한 단방향 데이터 흐름을 따릅니다.
 
-**3. Score.** Four structural signals per table: measure density, temporal
-columns, outgoing key count, row estimate. Measure density is damped by
-absolute count — without that, `cart_items(cart_id, product_id, quantity)`
-scores a perfect 1.0 and outranks an orders table with five measures.
+```mermaid
+flowchart TD
+    subgraph S1["1단계: 물리 스키마 탐색 (Introspection)"]
+        Input["DDL (.sql) / PostgreSQL DB"] --> PhysicalSchema["PhysicalSchema 생성<br/>(테이블, 컬럼, PK, 명시적 FK)"]
+    end
 
-**4. Pick anchors.** Not by score: in a connected schema the top few facts are
-all one hop apart and describe the same corner. Each table can absorb a known
-set of neighbours, so anchor selection is minimum set cover, solved greedily.
+    subgraph S2["2단계: 누락된 외래 키 복구 (FK Recovery)"]
+        PhysicalSchema --> InferFK["infer_foreign_keys()<br/>• _id, _key 접미사 및 타깃 PK 매칭<br/>• 데이터 타입 계열 검증"]
+        InferFK --> SchemaGraph["SchemaGraph 구축<br/>(방향성 N:1 및 1:N 관계 그래프)"]
+    end
 
-Two questions stay separate. *Who may anchor?* Every table — a model anchored on
-a table exposes that table's grain, and a low fact score does not make that
-impossible. Gating the pool on score was measured to strand tables no other
-anchor reaches: `employees` scores 0.24, is referenced by nothing, and anchors a
-four-table model that nothing else can cover.
+    subgraph S3["3단계: 점수 산출 및 앵커 선정 (Scoring & Anchor Selection)"]
+        SchemaGraph --> Profile["profile_tables()<br/>• Factness 점수 계산 (0.0~1.0)<br/>(수치비율 40%, FK수 25%, 시간 20%, 크기 15%)"]
+        Profile --> Lattice["후보 격자 (Candidate Lattice) 형성<br/>• 커버리지 이득(Gain) 및 필드 비용(Cost) 계산"]
+        Lattice --> AnchorSelect{"앵커 선택기 (Selector)"}
+        AnchorSelect -->|"기본 (Deterministic)"| Greedy["GreedySelector<br/>• 탐욕적 최소 집합 커버 (Greedy Set Cover)"]
+        AnchorSelect -->|"--llm 옵션"| LLMSelect["LLMSelector<br/>• 비즈니스 맥락 판단 & 모델명 지정"]
+    end
 
-*Who is worth anchoring?* Whatever the policy admits. Two rules a candidate
-clears before it is ranked at all — one on what it brings, one on what it
-charges:
+    subgraph S4["4단계: 와이드 논리 모델 합성 (Composition)"]
+        Greedy --> Compose["compose()<br/>• 앵커 중심 N:1 관계 필드 인라인 평탄화<br/>• 1:N 자식 테이블 선집계 (Pre-aggregation)"]
+        LLMSelect --> Compose
+        Compose --> LogicalLayer["LogicalLayer (와이드 논리 모델)"]
+    end
 
-| Knob | Default | Effect |
-|---|---|---|
-| `--coverage` | `0.90` | fraction of tables the models should jointly cover |
-| `--min-gain` | `2` | new tables an extra model must bring |
-| `--max-cost` | `10` | fields it may spend per new table |
-| `--max-models` | unset | hard ceiling; a safety valve, not the plan |
-
-`--max-cost` exists because counting gain alone makes a model look free, and it
-is not — the reader pays for its whole field list. Without it the fixture buys
-three models at ~80% overlap with `orders`, each spending forty-odd fields to
-reach two tables nothing else covers:
-
-```
-                    models  covered   tokens   tables per 1k tokens
---max-cost 10 (default)  6    41/53    ~2.2k          18.7
---max-cost 1000          7    44/53    ~3.0k          14.4
+    subgraph S5["5단계: 직렬화 및 물리 SQL 재작성 (Presentation & Expansion)"]
+        LogicalLayer --> Presentation["tablefold fold / context<br/>• YAML / Markdown 프롬프트 직렬화"]
+        Presentation --> LLM_SQL["LLM: 자연어 ➔ 논리 SQL 작성"]
+        LLM_SQL --> Expand["tablefold expand<br/>• 조인 프루닝 (Join Pruning)<br/>• 실행 가능한 물리 CTE SQL 생성"]
+    end
 ```
 
-Ranking deliberately stays on *gain*, not gain-per-field. Dividing by price
-optimises for cheap coverage, which was measured to produce ten models anchored
-on `regions`, `carriers` and `payment_methods` — a third of the tokens, and
-nothing a person would ask a question about.
+### 📋 단계별 실행 순서 및 모듈
 
-**Who decides.** Building the candidate lattice — every table, what it reaches,
-what it would cost — has one answer. Choosing from it is a judgement, so it sits
-behind a `Selector`. Greedy is the default and needs nothing:
+| 단계 | 순서 및 과정 | 담당 모듈 | 핵심 역할 |
+|:---:|---|---|---|
+| **1단계** | **물리 스키마 탐색** <br/>*(Introspection)* | `tablefold.introspect` | DDL SQL 파일이나 PostgreSQL 실 DB 메타데이터로부터 테이블, 컬럼, PK, 명시적 FK 정보 추출 후 `PhysicalSchema` 객체 생성 |
+| **2단계** | **외래 키 추론 및 복구** <br/>*(FK Recovery)* | `tablefold.graph` | `_id`, `_key` 등의 컬럼명과 타깃 PK, 데이터 타입을 비교하여 누락된 FK를 복구하고 방향성 그래프(`SchemaGraph`) 구축 |
+| **3단계** | **점수 산출 및 앵커 선정** <br/>*(Scoring & Selection)* | `tablefold.scoring`<br/>`tablefold.clustering` | • **Scoring**: 수치 컬럼 비율/FK 수/시간 데이터로 Factness 점수(0.0~1.0) 계산<br/>• **Selection**: 최소 모델로 최대 커버리지를 얻도록 `GreedySelector`로 앵커 선정 (옵션 시 `LLMSelector` 사용) |
+| **4단계** | **와이드 논리 모델 합성** <br/>*(Composition)* | `tablefold.composition` | 선정된 앵커를 중심으로 N:1 조인 경로를 인라인 평탄화하고, 1:N 자식 테이블은 입도(Grain) 보존을 위해 미리 `GROUP BY` 선집계(Pre-aggregation) 필드로 합성 |
+| **5단계** | **직렬화 및 물리 SQL 재작성** <br/>*(Presentation & Expansion)* | `tablefold.presentation`<br/>`tablefold.expansion` | • **Fold/Context**: 논리 모델 구조를 YAML/Markdown 형태의 프롬프트 직렬화<br/>• **Expand**: LLM이 작성한 논리 SQL을 받아 불필요한 조인을 제거(Join Pruning) 후 실제 물리 CTE SQL로 자동 재작성 |
 
-```python
-from tablefold.select import LLMSelector
-from tablefold.pipeline import fold
+---
 
-result = fold(schema, selector=LLMSelector(complete))   # complete: str -> str
-```
+## ⚙️ 핵심 작동 로직 (Core Logic)
 
-An `LLMSelector` exists because the lattice cannot express that `payments`,
-`invoices` and `returns` are one billing story rather than three, that
-`invoice_lines` is a poor name for a model a person will read, or that nobody
-here asks about campaigns. It also names the models, which greedy cannot — it
-has no basis for anything but the anchor's table name.
+`tablefold`는 파이프라인 전 과정이 비결정론적 환각 없이 **결정론적(Deterministic)**으로 작동하도록 설계되었습니다.
 
-What the LLM is *not* trusted with is anything countable:
+### 1. 누락된 외래 키 복구 (FK Recovery)
+데이터베이스 덤프나 DDL에 외래 키(FK) 제약 조건이 누락된 경우가 많습니다. `tablefold`는 컬럼명과 타깃 테이블 키 패턴(`customer_id` → `customers.id`)을 추론하여 누락된 FK 관계를 자동으로 복구하고 그래프를 재구성합니다.
 
-- it picks from a closed set; names the lattice does not know are dropped
-- coverage, membership and marginal gain are recomputed from the graph, never
-  read back from the reply
-- `--max-models` still binds it
-- an unusable completion falls back to greedy, and the layer says so
-  (`anchors chosen by: greedy (llm fallback)`)
-- the grain rules in `compose` and `expand` never see its output
+### 2. 앵커(Anchor) 선정 & 최소 집합 커버 (Greedy Set Cover)
+팩트 점수가 높은 테이블만 앵커로 지정하면 인접한 팩트 테이블만 중복 선택됩니다. `tablefold`는 탐욕적 최소 집합 커버(Set Cover) 알고리즘으로 **최소한의 모델 수로 스키마 커버리지를 극대화**합니다.
+- **비용 통제 (`--max-cost`)**: 새로운 테이블 1개를 커버하기 위해 너무 많은 필드를 소비(토큰 낭비)하는 모델은 자동 배제합니다.
+- **LLM 앵커 보완 (`--llm`)**: 수치적 계산(커버리지/비용)은 그래프 알고리즘이 담당하되, 도메인 맥락 파악 및 모델 네이밍은 LLM이 보완할 수 있습니다.
 
-The worst a bad completion can do is choose a poor set of *real* anchors. It
-cannot produce a wrong number.
-
-`complete` is any `str -> str`, so no vendor SDK reaches the core. A ready
-adapter ships behind the `llm` extra:
-
-```bash
-uv sync --extra llm
-export ANTHROPIC_API_KEY=...
-tablefold fold --ddl fixtures/retail_50.sql --llm
-```
-
-`--min-gain` is the knob that finds the knee of the coverage curve:
-
-```
-models    1     2     3     4     5     7    11    16
-covered  16    29    35    38    40    44    48    53
-tokens  ~0.8k ~1.4k ~1.8k ~2.2k ~2.5k ~3.0k ~4.0k ~4.4k
-gain    +16   +13    +6    +3    +2   +2,+1  +1    +1
-```
-
-Selection stops when the target is met, when nothing left clears the admission
-rules, or at the ceiling — and the run says which. A fold that could not reach
-its target reports the shortfall instead of returning a short model list that
-reads as complete.
-
-**5. Compose.** One model per anchor, one row per anchor row, three field kinds:
-
-| Kind | Source | Why it is safe |
-|---|---|---|
-| `base` | the anchor's own columns | — |
-| `joined` | reached by following keys *forwards* | at most one row matches, so the grain cannot change |
-| `aggregated` | a child table, folded through `SUM` / `AVG` / `COUNT` | a child fans out and can never be inlined |
-
-Foreign-key columns are dropped from the output — the row they identify is
-promoted in their place, so a raw `customer_id` would be a redundant integer in
-a context window.
-
-## The part that matters: grain
-
-Order 1 has two line items. Join `order_items` to `orders` naively and order 1's
-`total` of 100 appears twice; revenue comes back as 250 instead of 150. Nothing
-errors. The query looks right.
-
-So children are grouped *before* they are joined:
+### 3. 데이터 그레인(Grain) 보존 (Pre-aggregation)
+1:N 관계인 자식 테이블을 단순 `JOIN`하면 행 수가 늘어나면서 매출이나 수량이 중복 계산(Fan-out)되는 심각한 오류가 발생합니다.
+`tablefold`는 자식 테이블을 조인하기 전에 **미리 `GROUP BY`로 선집계**하여 부모 행의 입도(Grain)를 완벽히 유지합니다.
 
 ```sql
+-- 자식 테이블(order_items)을 먼저 선집계한 뒤 조인하여 주문 행 수가 왜곡되지 않음
 LEFT JOIN (
   SELECT order_id, SUM(line_total) AS order_items_line_total_sum
   FROM order_items
@@ -241,79 +131,56 @@ LEFT JOIN (
 ) AS agg_order_items ON base.id = agg_order_items.order_id
 ```
 
-The subquery yields at most one row per parent key, so the join cannot change
-the row count. This is asserted by executing the expanded SQL against a live
-SQLite database and checking the number — not by inspecting the SQL string.
+### 4. 조인 프루닝 (Join Pruning)
+논리 모델이 15개 테이블을 포함하더라도, LLM이 작성한 SQL에서 실제로 사용한 필드에 필요한 조인 경로만 추려서 물리 CTE SQL로 변환합니다.
 
-## Join pruning
-
-A model may fold sixteen tables; a query touching four fields expands to the
-joins those four fields need.
-
-```
-$ tablefold expand "SELECT customer_tier_label, SUM(grand_total) AS revenue
-                    FROM orders WHERE placed_at >= '2026-01-01'
-                    GROUP BY customer_tier_label" --ddl fixtures/retail_50.sql
-
--- models: orders | joins 3/14 (11 pruned)
+```sql
+-- 쿼리에서 customer_tier_label과 grand_total만 참조한 경우 (불필요한 조인 제거)
 WITH tf__orders AS (
   SELECT
     base.grand_total AS grand_total,
-    base.placed_at AS placed_at,
     j_customers__customer_tiers.label AS customer_tier_label
   FROM orders AS base
-  LEFT JOIN customers AS j_customers
-    ON base.customer_id = j_customers.id
-  LEFT JOIN customer_tiers AS j_customers__customer_tiers
-    ON j_customers.tier_id = j_customers__customer_tiers.id
+  LEFT JOIN customers AS j_customers ON base.customer_id = j_customers.id
+  LEFT JOIN customer_tiers AS j_customers__customer_tiers ON j_customers.tier_id = j_customers__customer_tiers.id
 )
 SELECT customer_tier_label, SUM(grand_total) AS revenue
-FROM tf__orders AS orders
-WHERE placed_at >= '2026-01-01'
-GROUP BY customer_tier_label
+FROM tf__orders GROUP BY customer_tier_label
 ```
 
-Two details worth naming. Aliases are keyed on the whole join *path*, not the
-target table — `countries` reached via `addresses` and via `stores` are
-different joins. And the CTE is `tf__orders`, not `orders`: a CTE named after
-its own base table is a self-reference, and the physical table becomes
-unreachable.
+---
 
-## Limits
+## 프로젝트 디렉토리 구조 (Directory Structure)
 
-- **Coverage is a setting, and the shortfall is reported.** At the defaults, 44
-  of 53 tables land in a model; `--coverage 1.0 --min-gain 1` reaches all 53 at
-  16 models. What no setting reaches is a grandchild through more than
-  `--max-hops` steps — nothing at the anchor's grain can expose one without
-  aggregating an aggregate. `fold` lists whatever it missed and says why it
-  stopped.
-- **Anchor naming is mechanical.** Models are named after their anchor table.
-  Nothing here proposes that `orders` is "the sales subject area".
-- **Aggregate choice is fixed.** `COUNT`, plus `SUM`/`AVG` over the first three
-  numeric columns of each child. No configuration yet.
-- **Expansion covers single-statement `SELECT`.** Joins between two logical
-  models in one query work, but are not yet well tested.
-- **No column-value knowledge.** `status = 4` means nothing here. That is
-  enrichment on top, not folding.
+`tablefold`는 관심사의 분리와 단방향 데이터 흐름 구조로 모듈화되어 있습니다.
 
-## Where this came from
+- `src/tablefold/schema/`: 물리 스키마(PhysicalSchema) 및 논리 모델(LogicalModel) 등의 중간 표현(IR) 불변 객체 정의 (`ir.py`)
+- `src/tablefold/introspect/`: DDL 파일 파싱 및 실시간 PostgreSQL 스키마 추출 (`base.py`, `ddl.py`, `postgres.py`)
+- `src/tablefold/graph/`: 방향성 외래키 그래프 구축 및 암묵적 외래키 자동 추론 (`graph.py`)
+- `src/tablefold/scoring/`: 테이블의 Fact / Dimension 특성 분석 및 점수 산출 (`classify.py`)
+- `src/tablefold/clustering/`: 후보 격자 생성 및 앵커 선택기 (Greedy Set Cover 및 LLM 선택기) (`cluster.py`, `select.py`)
+- `src/tablefold/composition/`: 앵커 기준의 입도 보존 와이드 논리 모델 합성 (`compose.py`)
+- `src/tablefold/presentation/`: 비용 산정, 직렬화/렌더링 및 LLM 완결 어댑터 (`cost.py`, `emit.py`, `llm.py`)
+- `src/tablefold/expansion/`: 논리 SQL을 입도 보존 및 Join Pruning이 적용된 물리 SQL로 변환 (`expand.py`)
+- `src/tablefold/pipeline/`: 전체 파이프라인 단일 호출 진입점 (`pipeline.py`)
+- `src/tablefold/cli/`: 커맨드 라인 인터페이스 명령 (`main.py`)
 
-The approach is adapted from [WrenAI](https://github.com/Canner/WrenAI)'s open
-context layer — specifically its manifest extraction and CTE rewriting. What is
-*not* borrowed is the compression itself: WrenAI's models are roughly 1:1 with
-physical tables, and it reduces prompt size by retrieval and progressive
-disclosure rather than by collapsing tables. Folding fifty tables into four is a
-different operation, closer to subject-area denormalisation, and it is what this
-repo implements.
+---
 
-## Development
+## 🛠️ 주요 접기 옵션 (Fold Options)
+
+| 옵션 | 기본값 | 설명 |
+|---|---|---|
+| `--coverage` | `0.90` | 전체 테이블 커버리지 목표 비율 (예: 0.9 = 90%) |
+| `--min-gain` | `2` | 모델 1개 추가 시 가져와야 할 최소 신규 테이블 수 |
+| `--max-cost` | `10` | 신규 테이블 1개당 허용 필드 비용 한도 |
+| `--llm` | - | LLM 기반 의미론적 앵커 선정 및 모델명 지정 기능 사용 |
+
+---
+
+## 🧪 개발 및 테스트
 
 ```bash
-uv run pytest tests/ --cov=src/tablefold   # 80 tests, 91% coverage
-uv run ruff check src tests
-uv run ruff format src tests
+uv run pytest tests/           # 테스트 실행
+uv run ruff check src tests    # 린트 체크
 ```
-
-## License
-
-MIT

@@ -1,14 +1,14 @@
-"""Score every table on how fact-like it is.
+"""물리 테이블 특성 분석 및 Fact/Dimension 역할 탐지/스코어링.
 
-The fold needs to pick a small number of *anchors* — tables whose grain a wide
-model can sensibly sit at. Those are fact tables: rows describing events, with
-measures to aggregate and a time at which they happened. Dimensions describe
-things rather than events and make poor anchors, because a model anchored on a
-dimension has nothing to measure.
+모든 물리 테이블에 대해 Fact 가능성 점수(0.0 ~ 1.0)를 산출합니다:
 
-Scoring is structural on purpose. No table names, no column-name vocabulary, no
-model in the loop — the same schema always yields the same profile, and when a
-result looks wrong the inputs are four numbers you can read off the table.
+* **높은 점수 (Fact 가능성 높음)** — 많은 수치 측정값 컬럼, 시간/날짜 컬럼,
+  나가는 외래 키, 높은 행 수.
+* **낮은 점수 (Dimension 가능성 높음)** — 서술적 텍스트 컬럼 위주,
+  적은 행 수, 외래 키 없음.
+
+점수가 클러스터링 단계의 유일한 판단 요소는 아닙니다. 커버리지 확장을 위해
+점수가 낮은 Dimension 테이블도 앵커가 될 수 있습니다.
 """
 
 from __future__ import annotations
@@ -58,7 +58,9 @@ class TableProfile:
 
 
 def profile_tables(graph: SchemaGraph) -> tuple[TableProfile, ...]:
-    """Profile every table in the schema, highest-scoring first."""
+    """스키마 내의 모든 테이블 프로필을 분석하고,
+    Fact 점수가 높은 순으로 정렬하여 반환합니다.
+    """
     tables = graph.schema.tables
     if not tables:
         return ()

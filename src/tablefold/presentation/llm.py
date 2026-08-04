@@ -1,12 +1,8 @@
-"""A completion callable, for callers who do not already have one.
+"""Anthropic LLM 완결 어댑터 모듈.
 
-:class:`~tablefold.select.LLMSelector` takes any ``str -> str``, which is the
-whole interface it needs and keeps the core free of a vendor SDK. This module is
-the convenience path: one adapter, behind the ``llm`` extra, so ``--llm`` on the
-command line works without the caller writing glue.
-
-Anything else — a different provider, a cached client, a proxy, a recorded
-fixture — is a plain function and needs nothing from here.
+:class:`~tablefold.select.LLMSelector`는 프롬프트와 텍스트 반환을 담당하는
+단순한 ``str -> str`` 함수를 요구합니다. 이 모듈은 CLI의 ``--llm`` 플래그 사용 시
+손쉽게 Anthropic API를 연동할 수 있는 편의 어댑터를 제공합니다.
 """
 
 from __future__ import annotations
@@ -21,7 +17,8 @@ DEFAULT_MAX_TOKENS = 2048
 
 
 class LLMUnavailable(RuntimeError):
-    """The SDK or the credential needed for a completion is missing."""
+    """LLM 완료 호출에 필요한 SDK나 API 키 등의
+    인증 정보가 누락된 경우 발생하는 예외."""
 
 
 def anthropic_completer(
@@ -30,11 +27,7 @@ def anthropic_completer(
     api_key: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ):
-    """Return a ``str -> str`` completion function backed by the Anthropic API.
-
-    Raises :class:`LLMUnavailable` at construction rather than at call time, so
-    a missing SDK or key fails before a fold has been half-run.
-    """
+    """Anthropic API 기반의 ``str -> str`` 완결 함수를 반환합니다."""
     try:
         import anthropic
     except ImportError as exc:  # pragma: no cover - depends on the extra

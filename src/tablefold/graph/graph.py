@@ -1,10 +1,10 @@
-"""The foreign-key graph, and recovery of edges the database never declared.
+"""외래 키 그래프 구축 및 데이터베이스에 명시되지 않은 엣지 추론/복구.
 
-Everything downstream — fact detection, clustering, field promotion, join
-expansion — is a walk over this graph. Edges are directed: an edge points from
-the table holding the key to the table holding the referenced row, so following
-an edge forwards is always many-to-one and following it backwards is always
-one-to-many.
+Fact 탐지, 클러스터링, 필드 승격, 조인 확장 등 하위의 모든 알고리즘은
+이 그래프 탐색을 기반으로 작동합니다.
+엣지는 방향성을 가집니다: 엣지는 키를 가진 테이블에서 참조 대상 행을 가진
+테이블로 향하므로, 엣지를 정방향으로 따라가는 것은 항상 N:1(Many-to-One)이며
+역방향으로 따라가는 것은 항상 1:N(One-to-Many)입니다.
 """
 
 from __future__ import annotations
@@ -12,7 +12,14 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
-from tablefold.schema.ir import Cardinality, ForeignKey, JoinStep, PhysicalSchema
+from tablefold.schema.ir import (
+    Cardinality,
+    ForeignKey,
+    JoinStep,
+    PhysicalSchema,
+    _norm_type,
+    name_aliases,
+)
 
 # Suffixes that mark a column as a reference to another table's key.
 _KEY_SUFFIXES = ("_id", "_code", "_key", "_no", "_fk")
@@ -43,11 +50,13 @@ class SchemaGraph:
     # ── adjacency ────────────────────────────────────────────────────────────
 
     def outgoing(self, table: str) -> tuple[ForeignKey, ...]:
-        """FKs this table holds. Following one is many-to-one."""
+        """이 테이블이 가진 FK 목록. 이 엣지를 따르는 것은 N:1 관계입니다."""
         return self._out.get(table.lower(), ())
 
     def incoming(self, table: str) -> tuple[ForeignKey, ...]:
-        """FKs pointing at this table. Following one backwards is one-to-many."""
+        """이 테이블을 가리키는 FK 목록.
+        이 엣지를 역방향으로 따르는 것은 1:N 관계입니다.
+        """
         return self._in.get(table.lower(), ())
 
     def out_degree(self, table: str) -> int:
@@ -56,62 +65,15 @@ class SchemaGraph:
     def in_degree(self, table: str) -> int:
         return len(self.incoming(table))
 
-    def neighbours(self, table: str) -> set[str]:
-        """Adjacent tables, ignoring direction, excluding self-references."""
-        lowered = table.lower()
-        found = {fk.to_table.lower() for fk in self.outgoing(table)}
-        found |= {fk.from_table.lower() for fk in self.incoming(table)}
-        return found - {lowered}
-
     # ── traversal ────────────────────────────────────────────────────────────
-
-    def components(self) -> tuple[frozenset[str], ...]:
-        """Connected components over the undirected projection of the graph."""
-        unseen = {t.name.lower() for t in self.schema.tables}
-        found: list[frozenset[str]] = []
-        while unseen:
-            root = min(unseen)
-            group: set[str] = set()
-            queue = deque([root])
-            while queue:
-                current = queue.popleft()
-                if current in group:
-                    continue
-                group.add(current)
-                unseen.discard(current)
-                queue.extend(self.neighbours(current) - group)
-            found.append(frozenset(group))
-        return tuple(sorted(found, key=lambda g: (-len(g), min(g))))
-
-    def shortest_path(
-        self, source: str, target: str, *, max_hops: int = 6
-    ) -> int | None:
-        """Undirected hop count between two tables, or ``None`` if unreachable."""
-        src, dst = source.lower(), target.lower()
-        if src == dst:
-            return 0
-        seen = {src}
-        queue = deque([(src, 0)])
-        while queue:
-            current, depth = queue.popleft()
-            if depth >= max_hops:
-                continue
-            for neighbour in self.neighbours(current):
-                if neighbour == dst:
-                    return depth + 1
-                if neighbour not in seen:
-                    seen.add(neighbour)
-                    queue.append((neighbour, depth + 1))
-        return None
 
     def walk_many_to_one(
         self, source: str, *, max_hops: int
     ) -> tuple[tuple[str, tuple[JoinStep, ...]], ...]:
-        """Every table reachable from *source* by following outgoing FKs only.
+        """*source*에서 출발하여 나가는 FK만 따라 도달 가능한 모든 테이블을 반환합니다.
 
-        Returns ``(table, path)`` pairs, shortest path first. Because every step
-        is many-to-one, joining along any of these paths preserves the source
-        table's grain — that is the whole reason the fold is safe.
+        최단 경로 순으로 ``(table, path)`` 쌍을 반환합니다. 모든 단계가 N:1 관계이므로
+        이 경로들을 따라 조인하는 것은 source 테이블의 입도(Grain)를 완벽히 보존합니다.
         """
         results: list[tuple[str, tuple[JoinStep, ...]]] = []
         seen = {source.lower()}
@@ -140,7 +102,7 @@ class SchemaGraph:
         return tuple(results)
 
     def children(self, table: str) -> tuple[tuple[str, JoinStep], ...]:
-        """Tables that reference *table*. One step backwards — one-to-many."""
+        """*table*을 참조하는 테이블 목록 (자식 테이블). 역방향 1단계(1:N 관계)."""
         found: list[tuple[str, JoinStep]] = []
         for fk in self.incoming(table):
             if fk.from_table.lower() == table.lower():
@@ -164,16 +126,7 @@ class SchemaGraph:
 
 
 def infer_foreign_keys(schema: PhysicalSchema) -> tuple[ForeignKey, ...]:
-    """Recover undeclared references by matching column names against keys.
-
-    A column qualifies when its name strips to a known table (``customer_id`` ->
-    ``customers``) and its type matches that table's single-column primary key.
-    Edges already declared are never duplicated.
-
-    This exists because backup dumps and warehouse landing zones routinely
-    arrive with every constraint stripped, leaving a schema whose real structure
-    is present only in naming convention.
-    """
+    """컬럼명 규칙과 데이터 타입을 기반으로 누락된 외래 키 관계를 복구/추론합니다."""
     by_key: dict[tuple[str, str], str] = {}
     for table in schema.tables:
         if len(table.primary_key) != 1:
@@ -181,7 +134,7 @@ def infer_foreign_keys(schema: PhysicalSchema) -> tuple[ForeignKey, ...]:
         pk_column = table.column(table.primary_key[0])
         if pk_column is None:
             continue
-        for alias in _name_aliases(table.name):
+        for alias in name_aliases(table.name):
             by_key[(alias, _type_class(pk_column.type))] = table.name
 
     declared = {(fk.from_table.lower(), fk.from_columns) for fk in schema.foreign_keys}
@@ -229,21 +182,6 @@ def _strip_key_suffix(column_name: str) -> str | None:
     return None
 
 
-def _name_aliases(table_name: str) -> set[str]:
-    """Singular/plural spellings a referencing column might use."""
-    lowered = table_name.lower()
-    aliases = {lowered}
-    if lowered.endswith("ies"):
-        aliases.add(lowered[:-3] + "y")
-    if lowered.endswith("ses"):
-        aliases.add(lowered[:-2])
-    if lowered.endswith("s"):
-        aliases.add(lowered[:-1])
-    else:
-        aliases.add(lowered + "s")
-    return aliases
-
-
 def _type_class(raw: str) -> str:
     """Collapse a declared type to a comparability class.
 
@@ -251,8 +189,6 @@ def _type_class(raw: str) -> str:
     key is normal, and refusing to match on that difference would lose most real
     edges.
     """
-    from tablefold.schema.ir import _norm_type
-
     base = _norm_type(raw)
     integers = {
         "smallint",

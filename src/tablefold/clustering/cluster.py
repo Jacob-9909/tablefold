@@ -25,9 +25,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tablefold.scoring.classify import TableProfile
-from tablefold.presentation.cost import DEFAULT_MAX_FIELDS, estimate_fields
-from tablefold.graph.graph import SchemaGraph
 from tablefold.clustering.select import (
     Candidate,
     CandidateLattice,
@@ -36,6 +33,9 @@ from tablefold.clustering.select import (
     Selector,
     StopReason,
 )
+from tablefold.graph.graph import SchemaGraph
+from tablefold.presentation.cost import MAX_MODEL_FIELDS, estimate_fields
+from tablefold.scoring.classify import TableProfile
 
 __all__ = [
     "Clustering",
@@ -106,7 +106,7 @@ def build_lattice(
     profiles: tuple[TableProfile, ...],
     *,
     max_hops: int = 3,
-    max_fields: int = DEFAULT_MAX_FIELDS,
+    max_fields: int = MAX_MODEL_FIELDS,
 ) -> CandidateLattice:
     """Price and measure every table as a potential anchor.
 
@@ -123,7 +123,7 @@ def build_lattice(
                 reach=reachable_tables(graph, p.name, max_hops=max_hops),
                 estimated_fields=max(
                     estimate_fields(
-                        graph, p.name, max_hops=max_hops, max_fields=max_fields
+                        graph, p.name, max_hops=max_hops, cap=max_fields
                     ),
                     1,
                 ),
@@ -141,9 +141,9 @@ def cluster(
     policy: SelectionPolicy | None = None,
     selector: Selector | None = None,
     max_hops: int = 3,
-    max_fields: int = DEFAULT_MAX_FIELDS,
+    max_fields: int = MAX_MODEL_FIELDS,
 ) -> Clustering:
-    """Choose anchors and report what they cover."""
+    """앵커 테이블을 선택하고 이들이 커버하는 물리 영역 및 통계를 산출합니다."""
     rules = policy or SelectionPolicy()
     total = len(graph.schema.tables)
 

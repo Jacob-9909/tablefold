@@ -10,6 +10,9 @@ from tablefold.schema.ir import (
     PhysicalSchema,
     PhysicalTable,
     _norm_type,
+    name_aliases,
+    plural,
+    singular,
 )
 
 __all__ = [
@@ -24,4 +27,7 @@ __all__ = [
     "PhysicalSchema",
     "PhysicalTable",
     "_norm_type",
+    "name_aliases",
+    "plural",
+    "singular",
 ]

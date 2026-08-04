@@ -2,6 +2,22 @@ from __future__ import annotations
 
 import sys
 
+from tablefold.clustering import select
+from tablefold.clustering.cluster import Clustering, SubjectArea, cluster
+from tablefold.clustering.select import LLMSelector, SelectionPolicy, Selector
+from tablefold.composition.compose import ComposeOptions, compose
+from tablefold.expansion.expand import ExpansionError, expand
+from tablefold.graph.graph import SchemaGraph, infer_foreign_keys
+from tablefold.pipeline.pipeline import FoldResult, fold
+from tablefold.presentation.cost import DEFAULT_FIELD_BUDGET, estimate_fields
+from tablefold.presentation.emit import (
+    render_report,
+    render_text,
+    to_dict,
+    to_json,
+    to_yaml,
+)
+
 # Import in dependency order to prevent circular initialization
 from tablefold.schema.ir import (
     Cardinality,
@@ -15,16 +31,7 @@ from tablefold.schema.ir import (
     PhysicalSchema,
     PhysicalTable,
 )
-from tablefold.graph.graph import SchemaGraph, infer_foreign_keys
 from tablefold.scoring.classify import TableProfile, profile_tables
-from tablefold.presentation.cost import DEFAULT_MAX_FIELDS, estimate_fields
-from tablefold.presentation.emit import render_report, render_text, to_dict, to_json, to_yaml
-from tablefold.clustering import select
-from tablefold.clustering.cluster import Clustering, SubjectArea, cluster
-from tablefold.clustering.select import LLMSelector, SelectionPolicy, Selector
-from tablefold.composition.compose import ComposeOptions, compose
-from tablefold.expansion.expand import ExpansionError, expand
-from tablefold.pipeline.pipeline import FoldResult, fold
 
 # Legacy module aliases for backward compatibility
 sys.modules["tablefold.ir"] = sys.modules["tablefold.schema.ir"]
@@ -43,7 +50,7 @@ __all__ = [
     "Cardinality",
     "Clustering",
     "ComposeOptions",
-    "DEFAULT_MAX_FIELDS",
+    "DEFAULT_FIELD_BUDGET",
     "ExpansionError",
     "FieldKind",
     "FoldResult",

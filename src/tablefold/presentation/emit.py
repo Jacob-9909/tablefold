@@ -1,13 +1,10 @@
-"""Serialise a logical layer.
+"""논리 레이어를 직렬화(Serialise)하고 다양한 형식으로 출력합니다.
 
-Three renderings, for three readers:
+3가지 대상별 렌더링 형식:
 
-* :func:`to_dict` — the full layer including every field's provenance. Round
-  trips, diffs cleanly in review, and is what the expander consumes.
-* :func:`render_text` — the compact form meant for a prompt. Provenance is
-  dropped; what a model needs is the field list, not how it was derived.
-* :func:`render_report` — what a person reads after a run, to judge whether the
-  fold picked sane anchors.
+* :func:`to_dict` — 각 필드의 출처(provenance) 정보가 포함된 전체 레이어 구조.
+* :func:`render_text` — LLM 프롬프트 입력용 콤팩트 텍스트 포맷.
+* :func:`render_report` — 실행 후 폴딩 결과를 평가/보고하기 위한 리포트.
 """
 
 from __future__ import annotations
@@ -81,11 +78,11 @@ def render_text(layer: LogicalLayer) -> str:
     needs: aggregated fields are already summarised over child rows, so
     wrapping one in another ``SUM`` double-counts.
     """
-    lines: list[str] = [
-        f"{layer.source_table_count} physical tables folded into "
-        f"{len(layer.models)} models.",
-        "",
-    ]
+    header = (
+        f"=== TIER-1 CORE WIDE MODELS ({len(layer.models)} models covering "
+        f"{layer.covered_table_count}/{layer.source_table_count} physical tables) ==="
+    )
+    lines: list[str] = [header, ""]
 
     for model in layer.models:
         lines.append(f"### {model.name}")
@@ -107,7 +104,7 @@ def render_text(layer: LogicalLayer) -> str:
         lines.append("")
 
     if layer.notes:
-        lines.append("Not covered by any model:")
+        lines.append("=== TIER-2 EDGE TABLES (On-Demand / Specific Query Fallback) ===")
         lines.extend(f"  {note.removeprefix('uncovered: ')}" for note in layer.notes)
         lines.append("")
 

@@ -1,9 +1,10 @@
-"""Introspect a physical schema from a DDL script.
+"""DDL 스크립트로부터 물리 스키마를 탐색/추출합니다.
 
-Reads ``CREATE TABLE`` (inline ``PRIMARY KEY`` / ``REFERENCES`` / table-level
-constraints) and ``ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY``, which is
-how ``pg_dump`` emits foreign keys. Anything else in the script is skipped
-rather than treated as an error, so a full dump can be pointed at directly.
+``CREATE TABLE`` (인라인 ``PRIMARY KEY`` / ``REFERENCES`` / 테이블 수준 제약 조건)과
+``ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY``
+(``pg_dump``의 외래 키 출력 방식) 구문을 읽어옵니다.
+스크립트 내의 다른 구문들은 오류로 처리되지 않고 건너뛰므로 전체 덤프 파일을
+직접 지정할 수 있습니다.
 """
 
 from __future__ import annotations
@@ -13,7 +14,12 @@ from pathlib import Path
 import sqlglot
 from sqlglot import exp
 
-from tablefold.schema.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
+from tablefold.schema.ir import (
+    ForeignKey,
+    PhysicalColumn,
+    PhysicalSchema,
+    PhysicalTable,
+)
 
 
 class DDLIntrospector:

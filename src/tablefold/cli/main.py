@@ -1,4 +1,4 @@
-"""Command line interface."""
+"""CLI(Command Line Interface) 커맨드 라인 모듈."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from tablefold import emit
 from tablefold.clustering.cluster import SelectionPolicy
 from tablefold.expansion.expand import ExpansionError, expand
 from tablefold.introspect.ddl import DDLIntrospector
-from tablefold.schema.ir import PhysicalSchema
 from tablefold.pipeline.pipeline import FoldResult, fold
+from tablefold.schema.ir import PhysicalSchema
 
 app = typer.Typer(
     add_completion=False,
@@ -81,7 +81,12 @@ HopsOption = Annotated[
     typer.Option("--max-hops", min=1, help="How far to follow foreign keys forwards."),
 ]
 FieldsOption = Annotated[
-    int, typer.Option("--max-fields", min=1, help="Field cap per model.")
+    int,
+    typer.Option(
+        "--field-budget",
+        min=1,
+        help="Fields the whole layer may spend, shared across models.",
+    ),
 ]
 
 
@@ -96,7 +101,7 @@ def fold_command(
     llm: LlmOption = False,
     max_models: MaxModelsOption = None,
     max_hops: HopsOption = 3,
-    max_fields: FieldsOption = 64,
+    field_budget: FieldsOption = 200,
     output: Annotated[
         Path | None, typer.Option("--out", "-o", help="Write the layer to this path.")
     ] = None,
@@ -104,7 +109,7 @@ def fold_command(
         str, typer.Option("--format", "-f", help="yaml | json | text | report")
     ] = "report",
 ) -> None:
-    """Read a schema, fold it, and write the logical layer."""
+    """물리 스키마를 읽어 와이드 논리 레이어로 Fold(압축)하고 결과를 출력합니다."""
     result = _run_fold(
         ddl=ddl,
         dsn=dsn,
@@ -115,7 +120,7 @@ def fold_command(
         llm=llm,
         max_models=max_models,
         max_hops=max_hops,
-        max_fields=max_fields,
+        field_budget=field_budget,
     )
     rendered = _render(result, output_format)
 
@@ -171,7 +176,7 @@ def expand_command(
     llm: LlmOption = False,
     max_models: MaxModelsOption = None,
     max_hops: HopsOption = 3,
-    max_fields: FieldsOption = 64,
+    field_budget: FieldsOption = 200,
     dialect: Annotated[
         str, typer.Option("--dialect", help="Target SQL dialect.")
     ] = "postgres",
@@ -199,7 +204,7 @@ def expand_command(
         llm=llm,
         max_models=max_models,
         max_hops=max_hops,
-        max_fields=max_fields,
+        field_budget=field_budget,
     )
 
     try:
@@ -229,7 +234,7 @@ def context_command(
     llm: LlmOption = False,
     max_models: MaxModelsOption = None,
     max_hops: HopsOption = 3,
-    max_fields: FieldsOption = 64,
+    field_budget: FieldsOption = 200,
 ) -> None:
     """Print the compact schema text intended for a prompt."""
     result = _run_fold(
@@ -242,7 +247,7 @@ def context_command(
         llm=llm,
         max_models=max_models,
         max_hops=max_hops,
-        max_fields=max_fields,
+        field_budget=field_budget,
     )
     text = emit.render_text(result.layer)
     typer.secho(
@@ -267,7 +272,7 @@ def _run_fold(
     llm: bool,
     max_models: int | None,
     max_hops: int,
-    max_fields: int,
+    field_budget: int,
 ) -> FoldResult:
     physical = _load_schema(ddl=ddl, dsn=dsn, schema=schema)
     return fold(
@@ -280,7 +285,7 @@ def _run_fold(
             max_areas=max_models,
         ),
         max_hops=max_hops,
-        max_fields=max_fields,
+        field_budget=field_budget,
     )
 
 
@@ -289,8 +294,8 @@ def _build_selector(llm: bool):
     if not llm:
         return None
 
-    from tablefold.presentation.llm import LLMUnavailable, anthropic_completer
     from tablefold.clustering.select import LLMSelector
+    from tablefold.presentation.llm import LLMUnavailable, anthropic_completer
 
     try:
         return LLMSelector(anthropic_completer())

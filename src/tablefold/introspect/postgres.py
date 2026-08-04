@@ -1,16 +1,21 @@
-"""Introspect a live PostgreSQL database.
+"""실시간 PostgreSQL 데이터베이스를 탐색/추출합니다.
 
-Requires the ``postgres`` extra (``pip install 'tablefold[postgres]'``).
+``postgres`` 엑스트라 패키지가 필요합니다 (``pip install 'tablefold[postgres]'``).
 
-Row counts come from ``pg_class.reltuples``, the planner's estimate. It is
-approximate and stale between ``ANALYZE`` runs, which is fine — it feeds one
-weighted term in fact scoring, and counting 50 tables exactly would cost a full
-scan each for no change in the outcome.
+행 수 추정치는 플래너의 추정치인 ``pg_class.reltuples``에서 가져옵니다.
+이는 개략적인 수치이며 ``ANALYZE`` 실행 사이에는 오래된 값일 수 있지만,
+Fact 점수 측정의 하나의 가중치 항목으로만 사용되므로 50개 테이블을
+정확히 스캔하여 셀 필요 없이 충분한 역할을 수행합니다.
 """
 
 from __future__ import annotations
 
-from tablefold.schema.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
+from tablefold.schema.ir import (
+    ForeignKey,
+    PhysicalColumn,
+    PhysicalSchema,
+    PhysicalTable,
+)
 
 _COLUMNS_SQL = """
 SELECT
