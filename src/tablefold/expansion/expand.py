@@ -25,8 +25,8 @@ from dataclasses import dataclass
 import sqlglot
 from sqlglot import exp
 
-from tablefold.graph import SchemaGraph
-from tablefold.ir import (
+from tablefold.graph.graph import SchemaGraph
+from tablefold.schema.ir import (
     FieldKind,
     JoinStep,
     LogicalField,

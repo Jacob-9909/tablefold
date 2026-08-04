@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tablefold.classify import TableProfile, profile_tables
-from tablefold.cluster import Clustering, cluster
-from tablefold.compose import ComposeOptions, compose
-from tablefold.graph import SchemaGraph, infer_foreign_keys
-from tablefold.ir import LogicalLayer, PhysicalSchema
+from tablefold.scoring.classify import TableProfile, profile_tables
+from tablefold.clustering.cluster import Clustering, cluster
+from tablefold.composition.compose import ComposeOptions, compose
+from tablefold.graph.graph import SchemaGraph, infer_foreign_keys
+from tablefold.schema.ir import LogicalLayer, PhysicalSchema
+from tablefold.clustering.select import SelectionPolicy, Selector
 
 
 @dataclass(frozen=True)
@@ -28,13 +29,22 @@ class FoldResult:
 def fold(
     schema: PhysicalSchema,
     *,
-    target_models: int = 4,
+    policy: SelectionPolicy | None = None,
+    selector: Selector | None = None,
     max_hops: int = 3,
     max_fields: int = 64,
     infer_missing_keys: bool = True,
     include_aggregates: bool = True,
 ) -> FoldResult:
-    """Fold a physical schema into ``target_models`` wide logical models.
+    """Fold a physical schema into as few wide logical models as ``policy`` allows.
+
+    The model count is an output, not an input: :class:`SelectionPolicy` states
+    how much coverage is wanted and what a model has to earn to justify itself,
+    and the fold reports how many that took.
+
+    ``selector`` decides which anchors those are — greedy set cover by default,
+    or :class:`~tablefold.select.LLMSelector` when the semantic calls a
+    foreign-key graph cannot make are worth a completion.
 
     ``infer_missing_keys`` recovers references from naming convention. It is on
     by default because a schema with no declared foreign keys yields no graph,
@@ -48,7 +58,14 @@ def fold(
 
     graph = SchemaGraph.build(enriched)
     profiles = profile_tables(graph)
-    clustering = cluster(graph, profiles, target_areas=target_models, max_hops=max_hops)
+    clustering = cluster(
+        graph,
+        profiles,
+        policy=policy,
+        selector=selector,
+        max_hops=max_hops,
+        max_fields=max_fields,
+    )
     layer = compose(
         graph,
         clustering,

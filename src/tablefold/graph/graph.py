@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
-from tablefold.ir import Cardinality, ForeignKey, JoinStep, PhysicalSchema
+from tablefold.schema.ir import Cardinality, ForeignKey, JoinStep, PhysicalSchema
 
 # Suffixes that mark a column as a reference to another table's key.
 _KEY_SUFFIXES = ("_id", "_code", "_key", "_no", "_fk")
@@ -251,7 +251,7 @@ def _type_class(raw: str) -> str:
     key is normal, and refusing to match on that difference would lose most real
     edges.
     """
-    from tablefold.ir import _norm_type
+    from tablefold.schema.ir import _norm_type
 
     base = _norm_type(raw)
     integers = {

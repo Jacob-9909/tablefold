@@ -10,7 +10,7 @@ scan each for no change in the outcome.
 
 from __future__ import annotations
 
-from tablefold.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
+from tablefold.schema.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
 
 _COLUMNS_SQL = """
 SELECT

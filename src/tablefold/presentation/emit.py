@@ -17,13 +17,17 @@ from typing import Any
 
 import yaml
 
-from tablefold.ir import FieldKind, LogicalLayer, LogicalModel
+from tablefold.schema.ir import FieldKind, LogicalLayer, LogicalModel
 
 
 def to_dict(layer: LogicalLayer) -> dict[str, Any]:
     return {
         "version": 1,
         "source_table_count": layer.source_table_count,
+        "covered_table_count": layer.covered_table_count,
+        "coverage": round(layer.coverage, 4),
+        "stop_reason": layer.stop_reason,
+        "selector": layer.selector,
         "model_count": len(layer.models),
         "compression_ratio": round(layer.compression_ratio, 2),
         "models": [_model_to_dict(m) for m in layer.models],
@@ -110,14 +114,33 @@ def render_text(layer: LogicalLayer) -> str:
     return "\n".join(lines)
 
 
+# Why selection stopped, in words, with the knob that would change it. The
+# model count is chosen by the objective now, so a reader who expected a
+# different number needs to know which lever moved it.
+_STOP_EXPLANATIONS = {
+    "coverage_reached": "coverage target met",
+    "gain_exhausted": "nothing left clears the admission rules — raise "
+    "--max-cost, lower --min-gain, or raise --max-hops for more coverage",
+    "max_areas": "hit the --max-models ceiling before the coverage target",
+    "no_candidates": "schema has no tables",
+    "selector_chose": "the selector returned this set explicitly",
+}
+
+
 def render_report(layer: LogicalLayer) -> str:
     """Per-model summary for a human reviewing the fold."""
     ratio = layer.compression_ratio
     lines = [
         f"{layer.source_table_count} tables -> {len(layer.models)} models "
-        f"({ratio:.1f}:1)",
-        "",
+        f"({ratio:.1f}:1), "
+        f"{layer.covered_table_count} covered ({layer.coverage * 100:.0f}%)",
     ]
+    if layer.selector and layer.selector != "greedy":
+        lines.append(f"anchors chosen by: {layer.selector}")
+    if layer.stop_reason:
+        explanation = _STOP_EXPLANATIONS.get(layer.stop_reason, layer.stop_reason)
+        lines.append(f"stopped: {explanation}")
+    lines.append("")
     for model in layer.models:
         counts = {kind: 0 for kind in FieldKind}
         for f in model.fields:

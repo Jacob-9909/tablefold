@@ -176,6 +176,17 @@ class LogicalModel:
 class LogicalLayer:
     models: tuple[LogicalModel, ...]
     source_table_count: int = 0
+    covered_table_count: int = 0
+    stop_reason: str | None = None
+    """Why anchor selection stopped, carried through so a saved layer explains
+    its own size. A layer that stopped short of its coverage target is a
+    reportable fact, not a defect to be discovered later."""
+
+    selector: str | None = None
+    """Who chose the anchors. A layer whose anchors came from a language model
+    should not be indistinguishable from one that did not — a reviewer deciding
+    how hard to check it needs to know which they are holding."""
+
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     def model(self, name: str) -> LogicalModel | None:
@@ -188,6 +199,13 @@ class LogicalLayer:
         if not self.models:
             return 0.0
         return self.source_table_count / len(self.models)
+
+    @property
+    def coverage(self) -> float:
+        """Fraction of physical tables that landed in at least one model."""
+        if not self.source_table_count:
+            return 0.0
+        return self.covered_table_count / self.source_table_count
 
 
 # ── Type vocabulary ───────────────────────────────────────────────────────────

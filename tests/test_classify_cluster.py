@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from tablefold.classify import TableRole, profile_tables
-from tablefold.cluster import cluster, reachable_tables
+import pytest
+
+from tablefold.classify import FACT_THRESHOLD, TableRole, profile_tables
+from tablefold.cluster import (
+    SelectionPolicy,
+    StopReason,
+    cluster,
+    reachable_tables,
+)
 from tablefold.graph import SchemaGraph
 from tablefold.ir import PhysicalColumn, PhysicalTable
 
@@ -101,17 +108,24 @@ def test_reach_excludes_grandchildren(tiny_graph):
 
 
 def test_anchors_spread_across_the_schema_instead_of_clustering(retail_graph):
-    result = cluster(retail_graph, profile_tables(retail_graph), target_areas=4)
+    result = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
+    )
 
+    # `shipments` would be the fourth on gain alone, but it overlaps `orders` by
+    # ten of its thirteen tables and charges 48 fields for the three that are
+    # new — the price ceiling turns it down in favour of a cheaper reach.
     anchors = {area.anchor for area in result.areas}
-    assert anchors == {"orders", "products", "customers", "shipments"}
+    assert anchors == {"orders", "products", "customers", "purchase_orders"}
 
 
 def test_more_anchors_never_lose_coverage(retail_graph):
     profiles = profile_tables(retail_graph)
 
     coverage = [
-        cluster(retail_graph, profiles, target_areas=n).covered_table_count
+        cluster(
+            retail_graph, profiles, policy=SelectionPolicy(max_areas=n)
+        ).covered_table_count
         for n in (2, 3, 4, 5, 6)
     ]
     assert coverage == sorted(coverage)
@@ -120,27 +134,185 @@ def test_more_anchors_never_lose_coverage(retail_graph):
 def test_a_hub_dimension_can_anchor_a_model(retail_graph):
     """``customers`` has no measures, so fact scoring alone would exclude it.
 
-    Eight tables reference it. Without hub anchoring, that whole half of the
-    schema — contacts, consents, loyalty, sessions — is unreachable from any
-    model.
+    Eight tables reference it, and a customer-grained model absorbs all eight.
+    Selection has to rank on coverage rather than on role, or that whole half of
+    the schema — contacts, consents, loyalty, sessions — is unreachable.
     """
     profiles = profile_tables(retail_graph)
     customers = next(p for p in profiles if p.name == "customers")
     assert customers.role is TableRole.DIMENSION
 
-    anchors = {a.anchor for a in cluster(retail_graph, profiles, target_areas=4).areas}
+    anchors = {
+        a.anchor
+        for a in cluster(
+            retail_graph, profiles, policy=SelectionPolicy(max_areas=4)
+        ).areas
+    }
     assert "customers" in anchors
 
 
-def test_target_is_a_ceiling_not_a_quota(tiny_graph):
+def test_a_low_scoring_table_anchors_when_nothing_else_reaches_it(retail_graph):
+    """Anchor eligibility is coverage, not score.
+
+    ``employees`` scores 0.24 and nothing references it, so a fact-or-hub
+    candidate pool excluded it — and because it is a grandchild of every anchor
+    that could see it, excluding it stranded four tables that no other anchor
+    reaches.
+    """
+    profiles = profile_tables(retail_graph)
+    employees = next(p for p in profiles if p.name == "employees")
+    assert employees.score < FACT_THRESHOLD
+    assert employees.in_degree == 0
+
+    result = cluster(
+        retail_graph,
+        profiles,
+        policy=SelectionPolicy(coverage_target=1.0, min_gain=1),
+    )
+
+    area = next(a for a in result.areas if a.anchor == "employees")
+    assert set(area.members) >= {"employees", "stores"}
+
+
+def test_max_areas_is_a_ceiling_not_a_quota(tiny_graph):
     # Only one table in the tiny schema can absorb anything new.
-    result = cluster(tiny_graph, profile_tables(tiny_graph), target_areas=10)
+    result = cluster(
+        tiny_graph, profile_tables(tiny_graph), policy=SelectionPolicy(max_areas=10)
+    )
 
     assert len(result.areas) < 10
 
 
+# ── selection policy ──────────────────────────────────────────────────────────
+
+
+def test_model_count_is_an_output_not_an_input(retail_graph):
+    """No fixed target: ask for full coverage and take however many that costs."""
+    result = cluster(
+        retail_graph,
+        profile_tables(retail_graph),
+        policy=SelectionPolicy(
+            coverage_target=1.0, min_gain=1, max_fields_per_table=float("inf")
+        ),
+    )
+
+    assert result.coverage == 1.0
+    assert result.unassigned == ()
+    assert result.stop_reason is StopReason.COVERAGE_REACHED
+    # The count is whatever the objective needed — the point is that it is not 4.
+    assert len(result.areas) > 4
+
+
+def test_a_model_must_not_overcharge_for_the_tables_it_adds(retail_graph):
+    """Gain alone makes a model look free. The reader pays for its field list.
+
+    ``shipments`` reaches three tables nothing else covers and spends 48 fields
+    doing it. Ranking on gain took that buy; the price ceiling declines it, and
+    coverage that expensive is left to the caller to ask for explicitly.
+    """
+    profiles = profile_tables(retail_graph)
+
+    priced = cluster(retail_graph, profiles, policy=SelectionPolicy())
+    unpriced = cluster(
+        retail_graph,
+        profiles,
+        policy=SelectionPolicy(max_fields_per_table=float("inf")),
+    )
+
+    assert "shipments" not in {a.anchor for a in priced.areas}
+    assert "shipments" in {a.anchor for a in unpriced.areas}
+
+    def fields(result):
+        return sum(a.estimated_fields for a in result.areas)
+
+    # Fewer models and fewer fields, for a coverage loss the report names.
+    assert len(priced.areas) < len(unpriced.areas)
+    assert fields(priced) < fields(unpriced)
+    assert priced.covered_table_count < unpriced.covered_table_count
+
+
+def test_every_area_is_priced_at_what_it_will_actually_cost(retail_graph):
+    """Selection prices models it has not built. The estimate has to be the
+    same rules ``compose`` builds from, or the objective optimises against a
+    model nobody produces."""
+    from tablefold.compose import compose
+
+    result = cluster(retail_graph, profile_tables(retail_graph))
+    layer = compose(retail_graph, result)
+
+    for area in result.areas:
+        model = layer.model(area.anchor)
+        assert model is not None
+        assert area.estimated_fields == len(model.fields)
+
+
+def test_min_gain_trades_coverage_for_a_smaller_layer(retail_graph):
+    """The knob that finds the knee: a model has to pay for its own field list."""
+    profiles = profile_tables(retail_graph)
+
+    cheap = cluster(retail_graph, profiles, policy=SelectionPolicy(min_gain=1))
+    strict = cluster(retail_graph, profiles, policy=SelectionPolicy(min_gain=3))
+
+    assert len(strict.areas) < len(cheap.areas)
+    assert strict.covered_table_count < cheap.covered_table_count
+
+
+def test_falling_short_of_the_target_is_reported_not_hidden(retail_graph):
+    """A layer that could not reach its target says so, and names no more models.
+
+    Silently returning 83% against a 95% request is the failure mode worth
+    guarding: the caller would read the model list and assume it was complete.
+    """
+    result = cluster(
+        retail_graph,
+        profile_tables(retail_graph),
+        policy=SelectionPolicy(coverage_target=0.95, min_gain=3),
+    )
+
+    assert result.coverage < 0.95
+    assert result.stop_reason is StopReason.GAIN_EXHAUSTED
+    assert result.unassigned
+
+
+def test_hitting_the_ceiling_is_distinguishable_from_running_out(retail_graph):
+    result = cluster(
+        retail_graph,
+        profile_tables(retail_graph),
+        policy=SelectionPolicy(coverage_target=1.0, min_gain=1, max_areas=3),
+    )
+
+    assert len(result.areas) == 3
+    assert result.stop_reason is StopReason.MAX_AREAS
+
+
+def test_areas_record_what_they_were_the_first_to_cover(retail_graph):
+    result = cluster(retail_graph, profile_tables(retail_graph))
+
+    gains = [area.new_tables for area in result.areas]
+    assert gains == sorted(gains, reverse=True)  # greedy takes the best gain first
+    assert sum(gains) == result.covered_table_count
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"coverage_target": 1.5},
+        {"coverage_target": -0.1},
+        {"min_gain": 0},
+        {"max_fields_per_table": 0},
+        {"max_fields_per_table": -1.0},
+        {"max_areas": 0},
+    ],
+)
+def test_policy_rejects_nonsense(kwargs):
+    with pytest.raises(ValueError):
+        SelectionPolicy(**kwargs)
+
+
 def test_areas_may_share_a_conformed_dimension(retail_graph):
-    result = cluster(retail_graph, profile_tables(retail_graph), target_areas=4)
+    result = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
+    )
     membership = {area.anchor: set(area.members) for area in result.areas}
 
     # `countries` is referenced from addresses, stores, suppliers and

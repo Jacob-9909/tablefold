@@ -17,8 +17,8 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 
-from tablefold.graph import SchemaGraph
-from tablefold.ir import PhysicalTable
+from tablefold.graph.graph import SchemaGraph
+from tablefold.schema.ir import PhysicalTable
 
 # Weights sum to 1.0. Measure density dominates because it is the signal that
 # actually separates events from entities; the rest break ties.

@@ -9,14 +9,15 @@ from typing import Annotated
 import typer
 
 from tablefold import emit
-from tablefold.expand import ExpansionError, expand
+from tablefold.clustering.cluster import SelectionPolicy
+from tablefold.expansion.expand import ExpansionError, expand
 from tablefold.introspect.ddl import DDLIntrospector
-from tablefold.ir import PhysicalSchema
-from tablefold.pipeline import FoldResult, fold
+from tablefold.schema.ir import PhysicalSchema
+from tablefold.pipeline.pipeline import FoldResult, fold
 
 app = typer.Typer(
     add_completion=False,
-    help="Fold a wide physical schema into a few wide logical models.",
+    help="Fold a wide physical schema into as few wide logical models as it takes.",
 )
 
 DdlOption = Annotated[
@@ -29,8 +30,51 @@ DsnOption = Annotated[
     ),
 ]
 SchemaOption = Annotated[str, typer.Option("--schema", help="Database schema name.")]
-ModelsOption = Annotated[
-    int, typer.Option("--models", "-n", min=1, help="Maximum number of logical models.")
+CoverageOption = Annotated[
+    float,
+    typer.Option(
+        "--coverage",
+        min=0.0,
+        max=1.0,
+        help="Fraction of tables the models should jointly cover.",
+    ),
+]
+MinGainOption = Annotated[
+    int,
+    typer.Option(
+        "--min-gain",
+        min=1,
+        help="New tables an extra model must bring to be worth its tokens. "
+        "Raise it for a smaller layer, lower it for more coverage.",
+    ),
+]
+MaxCostOption = Annotated[
+    float,
+    typer.Option(
+        "--max-cost",
+        min=0.1,
+        help="Fields a model may spend per table it is the first to cover. "
+        "Declines anchors that overlap an existing model almost entirely.",
+    ),
+]
+LlmOption = Annotated[
+    bool,
+    typer.Option(
+        "--llm",
+        help="Let a language model choose the anchors and name the models. "
+        "Needs the 'llm' extra and ANTHROPIC_API_KEY. Falls back to greedy if "
+        "the completion is unusable.",
+    ),
+]
+MaxModelsOption = Annotated[
+    int | None,
+    typer.Option(
+        "--max-models",
+        "-n",
+        min=1,
+        help="Hard ceiling on model count. Unset by default — the count is "
+        "normally an output of --coverage and --min-gain.",
+    ),
 ]
 HopsOption = Annotated[
     int,
@@ -46,7 +90,11 @@ def fold_command(
     ddl: DdlOption = None,
     dsn: DsnOption = None,
     schema: SchemaOption = "public",
-    models: ModelsOption = 4,
+    coverage: CoverageOption = 0.90,
+    min_gain: MinGainOption = 2,
+    max_cost: MaxCostOption = 10.0,
+    llm: LlmOption = False,
+    max_models: MaxModelsOption = None,
     max_hops: HopsOption = 3,
     max_fields: FieldsOption = 64,
     output: Annotated[
@@ -61,7 +109,11 @@ def fold_command(
         ddl=ddl,
         dsn=dsn,
         schema=schema,
-        models=models,
+        coverage=coverage,
+        min_gain=min_gain,
+        max_cost=max_cost,
+        llm=llm,
+        max_models=max_models,
         max_hops=max_hops,
         max_fields=max_fields,
     )
@@ -113,7 +165,11 @@ def expand_command(
     ddl: DdlOption = None,
     dsn: DsnOption = None,
     schema: SchemaOption = "public",
-    models: ModelsOption = 4,
+    coverage: CoverageOption = 0.90,
+    min_gain: MinGainOption = 2,
+    max_cost: MaxCostOption = 10.0,
+    llm: LlmOption = False,
+    max_models: MaxModelsOption = None,
     max_hops: HopsOption = 3,
     max_fields: FieldsOption = 64,
     dialect: Annotated[
@@ -137,7 +193,11 @@ def expand_command(
         ddl=ddl,
         dsn=dsn,
         schema=schema,
-        models=models,
+        coverage=coverage,
+        min_gain=min_gain,
+        max_cost=max_cost,
+        llm=llm,
+        max_models=max_models,
         max_hops=max_hops,
         max_fields=max_fields,
     )
@@ -163,7 +223,11 @@ def context_command(
     ddl: DdlOption = None,
     dsn: DsnOption = None,
     schema: SchemaOption = "public",
-    models: ModelsOption = 4,
+    coverage: CoverageOption = 0.90,
+    min_gain: MinGainOption = 2,
+    max_cost: MaxCostOption = 10.0,
+    llm: LlmOption = False,
+    max_models: MaxModelsOption = None,
     max_hops: HopsOption = 3,
     max_fields: FieldsOption = 64,
 ) -> None:
@@ -172,7 +236,11 @@ def context_command(
         ddl=ddl,
         dsn=dsn,
         schema=schema,
-        models=models,
+        coverage=coverage,
+        min_gain=min_gain,
+        max_cost=max_cost,
+        llm=llm,
+        max_models=max_models,
         max_hops=max_hops,
         max_fields=max_fields,
     )
@@ -193,17 +261,42 @@ def _run_fold(
     ddl: Path | None,
     dsn: str | None,
     schema: str,
-    models: int,
+    coverage: float,
+    min_gain: int,
+    max_cost: float,
+    llm: bool,
+    max_models: int | None,
     max_hops: int,
     max_fields: int,
 ) -> FoldResult:
     physical = _load_schema(ddl=ddl, dsn=dsn, schema=schema)
     return fold(
         physical,
-        target_models=models,
+        selector=_build_selector(llm),
+        policy=SelectionPolicy(
+            coverage_target=coverage,
+            min_gain=min_gain,
+            max_fields_per_table=max_cost,
+            max_areas=max_models,
+        ),
         max_hops=max_hops,
         max_fields=max_fields,
     )
+
+
+def _build_selector(llm: bool):
+    """Greedy unless the caller asked for a completion in the loop."""
+    if not llm:
+        return None
+
+    from tablefold.presentation.llm import LLMUnavailable, anthropic_completer
+    from tablefold.clustering.select import LLMSelector
+
+    try:
+        return LLMSelector(anthropic_completer())
+    except LLMUnavailable as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
 
 
 def _load_schema(*, ddl: Path | None, dsn: str | None, schema: str) -> PhysicalSchema:

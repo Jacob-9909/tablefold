@@ -3,14 +3,16 @@ from __future__ import annotations
 import pytest
 
 from tablefold.classify import profile_tables
-from tablefold.cluster import cluster
+from tablefold.cluster import SelectionPolicy, cluster
 from tablefold.compose import ComposeOptions, compose
 from tablefold.ir import Cardinality, FieldKind
 
 
 @pytest.fixture
 def tiny_layer(tiny_graph):
-    clustering = cluster(tiny_graph, profile_tables(tiny_graph), target_areas=2)
+    clustering = cluster(
+        tiny_graph, profile_tables(tiny_graph), policy=SelectionPolicy(max_areas=2)
+    )
     return compose(tiny_graph, clustering)
 
 
@@ -81,7 +83,9 @@ def test_children_contribute_a_row_count(tiny_layer):
 
 
 def test_aggregates_can_be_switched_off(tiny_graph):
-    clustering = cluster(tiny_graph, profile_tables(tiny_graph), target_areas=2)
+    clustering = cluster(
+        tiny_graph, profile_tables(tiny_graph), policy=SelectionPolicy(max_areas=2)
+    )
     layer = compose(
         tiny_graph, clustering, options=ComposeOptions(include_aggregates=False)
     )
@@ -91,7 +95,9 @@ def test_aggregates_can_be_switched_off(tiny_graph):
 
 
 def test_field_names_are_unique_within_a_model(retail_graph):
-    clustering = cluster(retail_graph, profile_tables(retail_graph), target_areas=4)
+    clustering = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
+    )
     layer = compose(retail_graph, clustering)
 
     for model in layer.models:
@@ -100,7 +106,9 @@ def test_field_names_are_unique_within_a_model(retail_graph):
 
 
 def test_the_field_cap_is_honoured_and_keeps_base_columns_first(retail_graph):
-    clustering = cluster(retail_graph, profile_tables(retail_graph), target_areas=4)
+    clustering = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
+    )
     layer = compose(retail_graph, clustering, options=ComposeOptions(max_fields=15))
 
     orders = layer.model("orders")
@@ -114,7 +122,9 @@ def test_the_field_cap_is_honoured_and_keeps_base_columns_first(retail_graph):
 
 
 def test_hop_budget_bounds_how_far_fields_travel(retail_graph):
-    clustering = cluster(retail_graph, profile_tables(retail_graph), target_areas=4)
+    clustering = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
+    )
     layer = compose(
         retail_graph, clustering, options=ComposeOptions(max_hops=1, max_fields=200)
     )
@@ -124,7 +134,9 @@ def test_hop_budget_bounds_how_far_fields_travel(retail_graph):
 
 
 def test_the_fold_actually_compresses(retail_graph):
-    clustering = cluster(retail_graph, profile_tables(retail_graph), target_areas=4)
+    clustering = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
+    )
     layer = compose(retail_graph, clustering)
 
     assert len(layer.models) == 4
@@ -133,7 +145,9 @@ def test_the_fold_actually_compresses(retail_graph):
 
 
 def test_uncovered_tables_are_reported_not_hidden(retail_graph):
-    clustering = cluster(retail_graph, profile_tables(retail_graph), target_areas=4)
+    clustering = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
+    )
     layer = compose(retail_graph, clustering)
 
     assert layer.notes

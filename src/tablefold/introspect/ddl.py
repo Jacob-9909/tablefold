@@ -13,7 +13,7 @@ from pathlib import Path
 import sqlglot
 from sqlglot import exp
 
-from tablefold.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
+from tablefold.schema.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
 
 
 class DDLIntrospector:

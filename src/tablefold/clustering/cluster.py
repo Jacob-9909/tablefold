@@ -1,39 +1,51 @@
-"""Choose the handful of anchors the wide models will sit on.
+"""Build the candidate lattice, hand it to a selector, assemble the result.
 
 An anchor is a table whose grain a wide model sits at. Picking them by score
 alone fails: in a connected schema the top-scoring facts are all adjacent, so
-the top four are four views of the same corner and half the schema goes
+the top few are several views of the same corner and half the schema goes
 uncovered.
 
-The objective is coverage. Each fact table can absorb a known set of
-neighbours — everything reachable by following its foreign keys forwards, plus
-its immediate children — so anchor selection is a **maximum coverage** problem,
-solved greedily: repeatedly take the fact that absorbs the most tables nothing
-has absorbed yet, weighted by how fact-like it is.
+Two questions are kept separate on purpose, and this module only answers the
+first:
 
-Greedy max-coverage is the standard (1 - 1/e) approximation. That bound is
-ample here, where the count of anchors is 3-5 and the alternative is a human
-guessing at subject areas.
+* **Who may anchor?** Every table. A model anchored on a table exposes that
+  table's own grain, and nothing about a low fact score makes that impossible.
+  Gating the pool on score was measured to strand tables no other anchor could
+  reach — ``employees`` scores 0.24 and anchors a four-table model.
+* **Who is worth anchoring?** A :class:`~tablefold.select.Selector`. Greedy set
+  cover by default; see :mod:`tablefold.select` for why that is a separate
+  decision and what else can make it.
+
+Whatever the selector returns is re-measured here. Coverage, membership and the
+uncovered list are computed from the graph, never read back from a selector — so
+a selector can choose badly but cannot misreport.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tablefold.classify import TableProfile
-from tablefold.graph import SchemaGraph
+from tablefold.scoring.classify import TableProfile
+from tablefold.presentation.cost import DEFAULT_MAX_FIELDS, estimate_fields
+from tablefold.graph.graph import SchemaGraph
+from tablefold.clustering.select import (
+    Candidate,
+    CandidateLattice,
+    GreedySelector,
+    SelectionPolicy,
+    Selector,
+    StopReason,
+)
 
-# How much a candidate's fact score can bend the coverage ranking. A pure
-# coverage sort would happily anchor on a table with no measures just because it
-# sits on a hub; this keeps measure-bearing tables ahead when coverage is close.
-_SCORE_INFLUENCE = 0.5
-
-# Referencing tables at which a dimension is also eligible to anchor a model.
-# ``customers`` is not a fact — it has no measures and describes a thing rather
-# than an event — but eight tables point at it, and a customer-grained model
-# absorbs all eight. Restricting anchors to facts leaves that entire half of the
-# schema unreachable, so hubs join the candidate pool and compete on coverage.
-HUB_IN_DEGREE = 3
+__all__ = [
+    "Clustering",
+    "SelectionPolicy",
+    "StopReason",
+    "SubjectArea",
+    "build_lattice",
+    "cluster",
+    "reachable_tables",
+]
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,14 @@ class SubjectArea:
     anchor: str
     members: tuple[str, ...]
     anchor_score: float
+    new_tables: int = 0
+    """Tables this area was the first to cover, in selection order. The marginal
+    gain that bought it a slot, kept so the report can show what it added."""
+
+    estimated_fields: int = 0
+    """What it was priced at when selected. Paired with ``new_tables`` this is
+    the whole case for the model existing: eight fields for three new tables is
+    a buy, forty for two is not."""
 
     @property
     def size(self) -> int:
@@ -60,6 +80,11 @@ class SubjectArea:
 class Clustering:
     areas: tuple[SubjectArea, ...]
     unassigned: tuple[str, ...] = ()
+    stop_reason: StopReason = StopReason.NO_CANDIDATES
+    total_table_count: int = 0
+    selector: str = "greedy"
+    """Who chose the anchors. A layer whose anchors came from a language model
+    should not be indistinguishable from one that did not."""
 
     @property
     def covered(self) -> frozenset[str]:
@@ -69,65 +94,101 @@ class Clustering:
     def covered_table_count(self) -> int:
         return len(self.covered)
 
+    @property
+    def coverage(self) -> float:
+        if not self.total_table_count:
+            return 0.0
+        return self.covered_table_count / self.total_table_count
+
+
+def build_lattice(
+    graph: SchemaGraph,
+    profiles: tuple[TableProfile, ...],
+    *,
+    max_hops: int = 3,
+    max_fields: int = DEFAULT_MAX_FIELDS,
+) -> CandidateLattice:
+    """Price and measure every table as a potential anchor.
+
+    ``max_fields`` is the cap the models will later be composed under, and is
+    needed here rather than only in ``compose``: a candidate whose fields would
+    be trimmed does not cost what its raw column count suggests.
+    """
+    return CandidateLattice(
+        candidates=tuple(
+            Candidate(
+                name=p.name,
+                role=p.role.value,
+                score=p.score,
+                reach=reachable_tables(graph, p.name, max_hops=max_hops),
+                estimated_fields=max(
+                    estimate_fields(
+                        graph, p.name, max_hops=max_hops, max_fields=max_fields
+                    ),
+                    1,
+                ),
+            )
+            for p in profiles
+        ),
+        total_table_count=len(graph.schema.tables),
+    )
+
 
 def cluster(
     graph: SchemaGraph,
     profiles: tuple[TableProfile, ...],
     *,
-    target_areas: int = 4,
+    policy: SelectionPolicy | None = None,
+    selector: Selector | None = None,
     max_hops: int = 3,
+    max_fields: int = DEFAULT_MAX_FIELDS,
 ) -> Clustering:
-    """Pick up to *target_areas* anchors that jointly cover the most tables.
+    """Choose anchors and report what they cover."""
+    rules = policy or SelectionPolicy()
+    total = len(graph.schema.tables)
 
-    ``target_areas`` is a ceiling, not a quota. Selection stops early once no
-    remaining fact table absorbs anything new — adding an anchor that covers
-    nothing would cost the reader a model and tell them nothing.
-    """
-    if not profiles:
-        return Clustering(areas=())
-
-    candidates = [p for p in profiles if p.is_fact or p.in_degree >= HUB_IN_DEGREE]
-    if not candidates:
-        return Clustering(areas=(), unassigned=tuple(p.name for p in profiles))
-
-    reach = {
-        p.name: reachable_tables(graph, p.name, max_hops=max_hops) for p in candidates
-    }
-
-    chosen: list[TableProfile] = []
-    covered: set[str] = set()
-
-    while len(chosen) < target_areas:
-        best: TableProfile | None = None
-        best_value = 0.0
-
-        for candidate in candidates:
-            if any(candidate.name == c.name for c in chosen):
-                continue
-            gain = len(reach[candidate.name] - covered)
-            if gain == 0:
-                continue
-            value = gain * (1.0 + _SCORE_INFLUENCE * candidate.score)
-            if value > best_value:
-                best, best_value = candidate, value
-
-        if best is None:
-            break
-
-        chosen.append(best)
-        covered |= reach[best.name]
-
-    areas = tuple(
-        SubjectArea(
-            name=anchor.name,
-            anchor=anchor.name,
-            members=tuple(sorted(reach[anchor.name])),
-            anchor_score=anchor.score,
+    if not profiles or total == 0:
+        return Clustering(
+            areas=(),
+            unassigned=tuple(sorted(p.name for p in profiles)),
+            stop_reason=StopReason.NO_CANDIDATES,
+            total_table_count=total,
         )
-        for anchor in chosen
+
+    lattice = build_lattice(graph, profiles, max_hops=max_hops, max_fields=max_fields)
+    selection = (selector or GreedySelector()).select(lattice, rules)
+
+    # Re-measure rather than trust. Marginal gain is recomputed in the order the
+    # selector returned, so `new_tables` describes this layer even when the
+    # anchors came from somewhere with no notion of what was covered first.
+    areas: list[SubjectArea] = []
+    covered: set[str] = set()
+    for choice in selection.choices:
+        candidate = lattice.get(choice.anchor)
+        if candidate is None:
+            continue
+        areas.append(
+            SubjectArea(
+                name=choice.name or candidate.name,
+                anchor=candidate.name,
+                members=tuple(sorted(candidate.reach)),
+                anchor_score=candidate.score,
+                new_tables=len(candidate.reach - covered),
+                estimated_fields=candidate.estimated_fields,
+            )
+        )
+        covered |= candidate.reach
+
+    unassigned = tuple(
+        sorted(p.name for p in profiles if p.name.lower() not in covered)
     )
-    unassigned = tuple(sorted(p.name for p in profiles if p.name not in covered))
-    return Clustering(areas=areas, unassigned=unassigned)
+    return Clustering(
+        areas=tuple(areas),
+        unassigned=unassigned,
+        stop_reason=selection.stop_reason,
+        total_table_count=total,
+        selector=selection.label,
+    )
 
 
 def reachable_tables(

@@ -102,10 +102,11 @@ def test_tables_with_no_readable_columns_are_dropped():
 
 
 def test_assembled_schema_folds():
+    from tablefold.cluster import SelectionPolicy
     from tablefold.pipeline import fold
 
     schema = _assemble("public", TABLE_ROWS, COLUMN_ROWS, PK_ROWS, FK_ROWS)
-    result = fold(schema, target_models=1)
+    result = fold(schema, policy=SelectionPolicy(max_areas=1))
 
     orders = result.layer.model("orders")
     assert orders is not None

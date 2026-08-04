@@ -21,9 +21,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tablefold.cluster import Clustering
-from tablefold.graph import SchemaGraph
-from tablefold.ir import (
+from tablefold.clustering.cluster import Clustering
+from tablefold.presentation.cost import (
+    DEFAULT_MAX_FIELDS,
+    NUMERIC_AGGREGATES,
+    aggregatable_columns,
+    promotable_columns,
+)
+from tablefold.graph.graph import SchemaGraph
+from tablefold.schema.ir import (
     FieldKind,
     FieldSource,
     JoinStep,
@@ -33,21 +39,11 @@ from tablefold.ir import (
     PhysicalTable,
 )
 
-# Columns that carry no business meaning at any grain.
-_NOISE_SUFFIXES = ("_hash", "_token", "_secret", "_password", "_salt")
-
-# Aggregates emitted per numeric child column, in order of usefulness.
-_NUMERIC_AGGREGATES = ("sum", "avg")
-
-# Cap on numeric columns aggregated from any single child, so one wide child
-# table cannot crowd out every other field in the model.
-_MAX_AGGREGATED_COLUMNS_PER_CHILD = 3
-
 
 @dataclass(frozen=True)
 class ComposeOptions:
     max_hops: int = 3
-    max_fields: int = 64
+    max_fields: int = DEFAULT_MAX_FIELDS
     include_foreign_key_columns: bool = False
     include_aggregates: bool = True
 
@@ -61,7 +57,7 @@ def compose(
     """Turn each subject area into one wide logical model."""
     opts = options or ComposeOptions()
     models = tuple(
-        _compose_one(graph, area.anchor, opts)
+        _compose_one(graph, area.anchor, opts, name=area.name)
         for area in clustering.areas
         if graph.schema.table(area.anchor) is not None
     )
@@ -69,11 +65,23 @@ def compose(
     return LogicalLayer(
         models=models,
         source_table_count=len(graph.schema.tables),
+        covered_table_count=clustering.covered_table_count,
+        stop_reason=clustering.stop_reason.value,
+        selector=clustering.selector,
         notes=notes,
     )
 
 
-def _compose_one(graph: SchemaGraph, anchor: str, opts: ComposeOptions) -> LogicalModel:
+def _compose_one(
+    graph: SchemaGraph, anchor: str, opts: ComposeOptions, *, name: str | None = None
+) -> LogicalModel:
+    """Build the model for *anchor*.
+
+    ``name`` is the model's name, which need not be the anchor's table name — a
+    selector that understands the domain may call an ``invoice_lines``-anchored
+    model ``billing``. The base table is unaffected: the grain is still one row
+    per anchor row, and expansion still reads from the physical table.
+    """
     table = graph.schema.table(anchor)
     assert table is not None  # guarded by the caller
 
@@ -110,7 +118,7 @@ def _compose_one(graph: SchemaGraph, anchor: str, opts: ComposeOptions) -> Logic
     fields = _apply_budget(candidates, opts.max_fields)
 
     return LogicalModel(
-        name=table.name,
+        name=name or table.name,
         base_table=table.name,
         fields=fields,
         absorbed_tables=tuple(sorted(absorbed - {table.name})),
@@ -127,28 +135,26 @@ def _compose_one(graph: SchemaGraph, anchor: str, opts: ComposeOptions) -> Logic
 def _base_fields(
     table: PhysicalTable, graph: SchemaGraph, opts: ComposeOptions
 ) -> list[LogicalField]:
-    fk_columns = _fk_columns(table, graph)
-    fields: list[LogicalField] = []
-
-    for column in table.columns:
-        lowered = column.name.lower()
-        if _is_noise(lowered):
-            continue
-        if lowered in fk_columns and not opts.include_foreign_key_columns:
-            # The referenced row's attributes are promoted in its place, so the
-            # raw key would be a redundant integer in an LLM's context window.
-            continue
-        fields.append(
-            LogicalField(
-                name=column.name,
-                type=column.type,
-                source=FieldSource(
-                    kind=FieldKind.BASE, table=table.name, column=column.name
-                ),
-                description=column.comment,
-            )
+    # Foreign keys are dropped by default: the referenced row's attributes are
+    # promoted in their place, so the raw key would be a redundant integer in an
+    # LLM's context window.
+    columns = promotable_columns(
+        table,
+        graph,
+        drop_primary_key=False,
+        drop_foreign_keys=not opts.include_foreign_key_columns,
+    )
+    return [
+        LogicalField(
+            name=column.name,
+            type=column.type,
+            source=FieldSource(
+                kind=FieldKind.BASE, table=table.name, column=column.name
+            ),
+            description=column.comment,
         )
-    return fields
+        for column in columns
+    ]
 
 
 def _joined_fields(
@@ -158,29 +164,21 @@ def _joined_fields(
     opts: ComposeOptions,
 ) -> list[LogicalField]:
     """Promote a referenced table's descriptive columns onto the anchor."""
-    fk_columns = _fk_columns(table, graph)
-    pk_columns = {c.lower() for c in table.primary_key}
     prefix = _singular(table.name)
-
-    fields: list[LogicalField] = []
-    for column in table.columns:
-        lowered = column.name.lower()
-        if _is_noise(lowered) or lowered in pk_columns or lowered in fk_columns:
-            continue
-        fields.append(
-            LogicalField(
-                name=_prefixed(prefix, column.name),
-                type=column.type,
-                source=FieldSource(
-                    kind=FieldKind.JOINED,
-                    table=table.name,
-                    column=column.name,
-                    path=path,
-                ),
-                description=column.comment,
-            )
+    return [
+        LogicalField(
+            name=_prefixed(prefix, column.name),
+            type=column.type,
+            source=FieldSource(
+                kind=FieldKind.JOINED,
+                table=table.name,
+                column=column.name,
+                path=path,
+            ),
+            description=column.comment,
         )
-    return fields
+        for column in promotable_columns(table, graph, drop_primary_key=True)
+    ]
 
 
 def _aggregated_fields(
@@ -204,18 +202,8 @@ def _aggregated_fields(
         )
     ]
 
-    fk_columns = _fk_columns(table, graph)
-    pk_columns = {c.lower() for c in table.primary_key}
-    numeric = [
-        c
-        for c in table.columns
-        if c.is_numeric
-        and c.name.lower() not in fk_columns
-        and c.name.lower() not in pk_columns
-    ][:_MAX_AGGREGATED_COLUMNS_PER_CHILD]
-
-    for column in numeric:
-        for aggregate in _NUMERIC_AGGREGATES:
+    for column in aggregatable_columns(table, graph):
+        for aggregate in NUMERIC_AGGREGATES:
             fields.append(
                 LogicalField(
                     name=f"{prefix}_{column.name}_{aggregate}",
@@ -276,14 +264,6 @@ def _disambiguate(field: LogicalField) -> str:
         return f"{_singular(source.table)}_{source.column}"
     via = _singular(source.path[-1].from_table)
     return f"{via}_{field.name}"
-
-
-def _fk_columns(table: PhysicalTable, graph: SchemaGraph) -> set[str]:
-    return {c.lower() for fk in graph.outgoing(table.name) for c in fk.from_columns}
-
-
-def _is_noise(column_name: str) -> bool:
-    return any(column_name.endswith(suffix) for suffix in _NOISE_SUFFIXES)
 
 
 def _prefixed(prefix: str, column: str) -> str:

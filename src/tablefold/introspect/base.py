@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from tablefold.ir import PhysicalSchema
+from tablefold.schema.ir import PhysicalSchema
 
 
 class Introspector(Protocol):

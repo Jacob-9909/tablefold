@@ -5,14 +5,16 @@ import sqlite3
 import pytest
 
 from tablefold.classify import profile_tables
-from tablefold.cluster import cluster
+from tablefold.cluster import SelectionPolicy, cluster
 from tablefold.compose import compose
 from tablefold.expand import ExpansionError, expand
 
 
 @pytest.fixture
 def tiny_layer(tiny_graph):
-    clustering = cluster(tiny_graph, profile_tables(tiny_graph), target_areas=2)
+    clustering = cluster(
+        tiny_graph, profile_tables(tiny_graph), policy=SelectionPolicy(max_areas=2)
+    )
     return compose(tiny_graph, clustering)
 
 
@@ -210,7 +212,9 @@ def test_every_model_field_expands(retail_graph):
     A field that composes but cannot expand is worse than a missing one: it
     appears in the prompt, an LLM uses it, and the query fails at the database.
     """
-    clustering = cluster(retail_graph, profile_tables(retail_graph), target_areas=4)
+    clustering = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
+    )
     layer = compose(retail_graph, clustering)
 
     for model in layer.models:

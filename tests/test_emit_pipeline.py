@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from tablefold import emit
 from tablefold.cli import app
+from tablefold.cluster import SelectionPolicy
 from tablefold.ir import FieldKind
 from tablefold.pipeline import fold
 from tests.conftest import FIXTURES
@@ -17,7 +18,7 @@ runner = CliRunner()
 
 @pytest.fixture(scope="module")
 def retail_fold(retail_schema):
-    return fold(retail_schema, target_models=4)
+    return fold(retail_schema, policy=SelectionPolicy(max_areas=4))
 
 
 # ── pipeline ──────────────────────────────────────────────────────────────────
@@ -34,7 +35,7 @@ def test_fold_recovers_a_schema_with_no_declared_keys(retail_schema):
     from dataclasses import replace
 
     stripped = replace(retail_schema, foreign_keys=())
-    result = fold(stripped, target_models=4)
+    result = fold(stripped, policy=SelectionPolicy(max_areas=4))
 
     assert result.inferred_foreign_keys > 40
     assert len(result.layer.models) == 4
@@ -46,7 +47,9 @@ def test_inference_can_be_switched_off(retail_schema):
     from dataclasses import replace
 
     stripped = replace(retail_schema, foreign_keys=())
-    result = fold(stripped, target_models=4, infer_missing_keys=False)
+    result = fold(
+        stripped, policy=SelectionPolicy(max_areas=4), infer_missing_keys=False
+    )
 
     assert result.inferred_foreign_keys == 0
     assert result.layer.models == ()
@@ -107,11 +110,68 @@ def test_report_names_every_model(retail_fold):
 # ── cli ───────────────────────────────────────────────────────────────────────
 
 
-def test_cli_fold_reports_the_compression():
+def test_cli_fold_reports_coverage_and_why_it_stopped():
+    """No model count is requested, so the report has to justify the one it chose."""
     result = runner.invoke(app, ["fold", "--ddl", str(FIXTURES / "retail_50.sql")])
 
     assert result.exit_code == 0
-    assert "53 tables -> 4 models" in result.stdout
+    assert "53 tables ->" in result.stdout
+    assert "covered" in result.stdout
+    assert "stopped:" in result.stdout
+
+
+def test_cli_min_gain_shrinks_the_layer():
+    def model_count(min_gain: str) -> int:
+        result = runner.invoke(
+            app,
+            [
+                "fold",
+                "--ddl",
+                str(FIXTURES / "retail_50.sql"),
+                "--min-gain",
+                min_gain,
+                "-f",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        return json.loads(result.stdout)["model_count"]
+
+    assert model_count("3") < model_count("1")
+
+
+def test_cli_max_cost_declines_expensive_anchors():
+    def layer(max_cost: str) -> dict:
+        result = runner.invoke(
+            app,
+            [
+                "fold",
+                "--ddl",
+                str(FIXTURES / "retail_50.sql"),
+                "--max-cost",
+                max_cost,
+                "-f",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        return json.loads(result.stdout)
+
+    cheap = layer("10")
+    unlimited = layer("1000")
+
+    assert cheap["model_count"] < unlimited["model_count"]
+    assert cheap["covered_table_count"] < unlimited["covered_table_count"]
+
+
+def test_cli_max_models_still_caps_the_layer():
+    result = runner.invoke(
+        app,
+        ["fold", "--ddl", str(FIXTURES / "retail_50.sql"), "-n", "4", "-f", "json"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["model_count"] == 4
 
 
 def test_cli_fold_writes_yaml(tmp_path):
@@ -131,7 +191,9 @@ def test_cli_fold_writes_yaml(tmp_path):
 
     assert result.exit_code == 0
     payload = yaml.safe_load(out.read_text())
-    assert payload["model_count"] == 4
+    assert payload["model_count"] > 0
+    assert payload["covered_table_count"] == 53 - len(payload["notes"])
+    assert payload["stop_reason"]
 
 
 def test_cli_expand_emits_runnable_sql():

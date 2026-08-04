@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import sys
+
+# Import in dependency order to prevent circular initialization
+from tablefold.schema.ir import (
+    Cardinality,
+    FieldKind,
+    ForeignKey,
+    JoinStep,
+    LogicalField,
+    LogicalLayer,
+    LogicalModel,
+    PhysicalColumn,
+    PhysicalSchema,
+    PhysicalTable,
+)
+from tablefold.graph.graph import SchemaGraph, infer_foreign_keys
+from tablefold.scoring.classify import TableProfile, profile_tables
+from tablefold.presentation.cost import DEFAULT_MAX_FIELDS, estimate_fields
+from tablefold.presentation.emit import render_report, render_text, to_dict, to_json, to_yaml
+from tablefold.clustering import select
+from tablefold.clustering.cluster import Clustering, SubjectArea, cluster
+from tablefold.clustering.select import LLMSelector, SelectionPolicy, Selector
+from tablefold.composition.compose import ComposeOptions, compose
+from tablefold.expansion.expand import ExpansionError, expand
+from tablefold.pipeline.pipeline import FoldResult, fold
+
+# Legacy module aliases for backward compatibility
+sys.modules["tablefold.ir"] = sys.modules["tablefold.schema.ir"]
+sys.modules["tablefold.graph"] = sys.modules["tablefold.graph.graph"]
+sys.modules["tablefold.classify"] = sys.modules["tablefold.scoring.classify"]
+sys.modules["tablefold.cluster"] = sys.modules["tablefold.clustering.cluster"]
+sys.modules["tablefold.compose"] = sys.modules["tablefold.composition.compose"]
+sys.modules["tablefold.expand"] = sys.modules["tablefold.expansion.expand"]
+sys.modules["tablefold.select"] = select
+sys.modules["tablefold.pipeline.select"] = select
+sys.modules["tablefold.emit"] = sys.modules["tablefold.presentation.emit"]
+sys.modules["tablefold.cost"] = sys.modules["tablefold.presentation.cost"]
+sys.modules["tablefold.llm"] = sys.modules["tablefold.presentation.llm"]
+
+__all__ = [
+    "Cardinality",
+    "Clustering",
+    "ComposeOptions",
+    "DEFAULT_MAX_FIELDS",
+    "ExpansionError",
+    "FieldKind",
+    "FoldResult",
+    "ForeignKey",
+    "JoinStep",
+    "LLMSelector",
+    "LogicalField",
+    "LogicalLayer",
+    "LogicalModel",
+    "PhysicalColumn",
+    "PhysicalSchema",
+    "PhysicalTable",
+    "SchemaGraph",
+    "SelectionPolicy",
+    "Selector",
+    "SubjectArea",
+    "TableProfile",
+    "cluster",
+    "compose",
+    "estimate_fields",
+    "expand",
+    "fold",
+    "infer_foreign_keys",
+    "profile_tables",
+    "render_report",
+    "render_text",
+    "to_dict",
+    "to_json",
+    "to_yaml",
+]
