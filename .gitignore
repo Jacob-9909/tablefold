@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Schema dumps and generated layers — real schemas are not public material
+*.dump
+*.sql.gz
+/schemas/
+/layer.yaml
+/layer.json
+
+# Credentials
+.env
+.pgpass
+*.pem
+
+# OS
+.DS_Store

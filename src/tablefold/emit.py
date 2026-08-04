@@ -1,0 +1,135 @@
+"""Serialise a logical layer.
+
+Three renderings, for three readers:
+
+* :func:`to_dict` — the full layer including every field's provenance. Round
+  trips, diffs cleanly in review, and is what the expander consumes.
+* :func:`render_text` — the compact form meant for a prompt. Provenance is
+  dropped; what a model needs is the field list, not how it was derived.
+* :func:`render_report` — what a person reads after a run, to judge whether the
+  fold picked sane anchors.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import yaml
+
+from tablefold.ir import FieldKind, LogicalLayer, LogicalModel
+
+
+def to_dict(layer: LogicalLayer) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "source_table_count": layer.source_table_count,
+        "model_count": len(layer.models),
+        "compression_ratio": round(layer.compression_ratio, 2),
+        "models": [_model_to_dict(m) for m in layer.models],
+        "notes": list(layer.notes),
+    }
+
+
+def to_yaml(layer: LogicalLayer) -> str:
+    return yaml.safe_dump(to_dict(layer), sort_keys=False, allow_unicode=True)
+
+
+def to_json(layer: LogicalLayer) -> str:
+    return json.dumps(to_dict(layer), indent=2, ensure_ascii=False)
+
+
+def _model_to_dict(model: LogicalModel) -> dict[str, Any]:
+    return {
+        "name": model.name,
+        "base_table": model.base_table,
+        "description": model.description,
+        "absorbed_tables": list(model.absorbed_tables),
+        "fields": [
+            {
+                "name": f.name,
+                "type": f.type,
+                "kind": f.source.kind.value,
+                "source": {
+                    "table": f.source.table,
+                    "column": f.source.column,
+                    "aggregate": f.source.aggregate,
+                    "path": [
+                        {
+                            "from": f"{s.from_table}({', '.join(s.from_columns)})",
+                            "to": f"{s.to_table}({', '.join(s.to_columns)})",
+                            "cardinality": s.cardinality.value,
+                        }
+                        for s in f.source.path
+                    ],
+                },
+                "description": f.description,
+            }
+            for f in model.fields
+        ],
+    }
+
+
+def render_text(layer: LogicalLayer) -> str:
+    """Compact schema text, sized for a prompt.
+
+    Fields are grouped by kind because the grouping carries a rule the reader
+    needs: aggregated fields are already summarised over child rows, so
+    wrapping one in another ``SUM`` double-counts.
+    """
+    lines: list[str] = [
+        f"{layer.source_table_count} physical tables folded into "
+        f"{len(layer.models)} models.",
+        "",
+    ]
+
+    for model in layer.models:
+        lines.append(f"### {model.name}")
+        if model.description:
+            lines.append(model.description)
+
+        for kind, label in (
+            (FieldKind.BASE, "Own columns"),
+            (FieldKind.JOINED, "Joined in (one related row each)"),
+            (FieldKind.AGGREGATED, "Aggregated from child rows"),
+        ):
+            group = [f for f in model.fields if f.source.kind is kind]
+            if not group:
+                continue
+            lines.append(f"{label}:")
+            for f in group:
+                note = f" — {f.description}" if f.description else ""
+                lines.append(f"  {f.name} ({f.type}){note}")
+        lines.append("")
+
+    if layer.notes:
+        lines.append("Not covered by any model:")
+        lines.extend(f"  {note.removeprefix('uncovered: ')}" for note in layer.notes)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def render_report(layer: LogicalLayer) -> str:
+    """Per-model summary for a human reviewing the fold."""
+    ratio = layer.compression_ratio
+    lines = [
+        f"{layer.source_table_count} tables -> {len(layer.models)} models "
+        f"({ratio:.1f}:1)",
+        "",
+    ]
+    for model in layer.models:
+        counts = {kind: 0 for kind in FieldKind}
+        for f in model.fields:
+            counts[f.source.kind] += 1
+        lines.append(
+            f"  {model.name:<24} {len(model.fields):>3} fields "
+            f"(base {counts[FieldKind.BASE]}, "
+            f"joined {counts[FieldKind.JOINED]}, "
+            f"agg {counts[FieldKind.AGGREGATED]})  "
+            f"absorbs {len(model.absorbed_tables) + 1} tables"
+        )
+    if layer.notes:
+        lines.append("")
+        lines.append(f"  {len(layer.notes)} tables uncovered")
+    return "\n".join(lines)
