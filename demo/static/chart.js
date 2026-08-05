@@ -419,7 +419,13 @@
           <div class="gauge-bar-track">
             <div class="gauge-bar-fill" style="width:${Math.min(100, colRet * 100)}%; background:${colColor};"></div>
           </div>
-          <span class="gauge-desc">${num(counts.total_columns)}개 중 ${num(counts.exposed_columns)}개를 꺼내 쓸 수 있음</span>
+          <span class="gauge-desc">답이 될 수 있는 ${num(
+            (counts.total_columns || 0) - (counts.dropped_noise_columns || 0)
+          )}개 중 ${num(counts.exposed_columns)}개를 꺼내 쓸 수 있음${
+            counts.dropped_noise_columns
+              ? ` (적재 메타 ${num(counts.dropped_noise_columns)}개는 셈에서 제외)`
+              : ""
+          }</span>
         </div>
 
         <!-- 2. 조인 흡수 -->

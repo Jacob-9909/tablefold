@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import os
+from dataclasses import replace
 
 from tablefold.graph.from_keys import infer_from_primary_keys
 from tablefold.introspect.mssql import MSSQLIntrospector
@@ -105,13 +106,19 @@ def _load_real(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
         schema, targets=dims or None, unique_subsets=subsets
     )
 
+    # 확신도는 측정값이다. ``from_keys`` 가 붙여 준 0.9 는 "스키마만 보고 지은
+    # 후보"라는 뜻의 자리표시자이고, 여기서는 실제 데이터를 읽어 위반율을 재므로
+    # 그 값으로 바꿔 적는다. 화면의 확신도가 전부 같은 숫자면 아무것도 재지 않은
+    # 것이고, 읽는 쪽은 그걸 구별할 방법이 없다.
     best: dict[tuple[str, tuple[str, ...]], ForeignKey] = {}
     for fk in candidates:
-        if _violation_rate(cur, fk) > VIOLATION_TOLERANCE:
+        rate = _violation_rate(cur, fk)
+        if rate > VIOLATION_TOLERANCE:
             continue
+        measured = replace(fk, confidence=round(1.0 - rate, 4))
         key = (fk.from_table.lower(), tuple(c.lower() for c in fk.from_columns))
         if key not in best or size[fk.to_table] < size[best[key].to_table]:
-            best[key] = fk
+            best[key] = measured
     conn.close()
 
     by_pair: dict[tuple[str, str], ForeignKey] = {}
