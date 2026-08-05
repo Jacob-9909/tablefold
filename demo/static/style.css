@@ -953,3 +953,88 @@ table.data code {
 
   .sheet-panel { padding: 20px; }
 }
+
+/* ── ERD (chart.js 가 SVG 로 그리는 것) ─────────────────────────────────── */
+
+.erd-svg {
+  display: block;
+  min-width: 100%;
+  padding: 4px;
+}
+
+.erd-box { cursor: pointer; }
+
+.erd-rect {
+  fill: var(--panel);
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.erd-box:hover .erd-rect { stroke: var(--accent); }
+
+.erd-anchor { stroke: var(--accent); stroke-width: 2; }
+.erd-agg { stroke: var(--aggregated); }
+.erd-inl { stroke: var(--joined); }
+
+.erd-sep { stroke: var(--line); stroke-width: 1; }
+
+.erd-stripe { fill: var(--bg); }
+
+.erd-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  fill: var(--ink);
+}
+
+.erd-title-anchor { fill: var(--accent); }
+.erd-title-agg { fill: var(--aggregated); }
+.erd-title-inl { fill: var(--joined); }
+
+.erd-badge {
+  font-size: 10.5px;
+  fill: var(--muted);
+}
+
+.erd-col {
+  font-family: var(--mono);
+  font-size: 11px;
+  fill: var(--ink);
+}
+
+.erd-type {
+  font-family: var(--mono);
+  font-size: 10px;
+  fill: var(--muted);
+}
+
+.erd-more {
+  font-size: 10.5px;
+  fill: var(--muted);
+  font-style: italic;
+}
+
+.erd-link {
+  stroke: var(--joined);
+  stroke-width: 1.6;
+  fill: none;
+}
+
+.erd-link-agg {
+  stroke: var(--aggregated);
+  stroke-dasharray: 5 4;
+}
+
+.erd-dot { fill: var(--panel); stroke: var(--joined); stroke-width: 1.6; }
+.erd-link-agg + .erd-dot { stroke: var(--aggregated); }
+
+.erd-sigma-bg {
+  fill: var(--panel);
+  stroke: var(--aggregated);
+  stroke-width: 1.5;
+}
+
+.erd-sigma {
+  font-size: 11px;
+  font-weight: 700;
+  fill: var(--aggregated);
+}
