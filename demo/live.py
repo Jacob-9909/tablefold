@@ -1,8 +1,12 @@
 """라이브 데이터베이스를 데모의 스키마 소스로 붙인다.
 
-환경 변수가 지정되어 있으면 실제 MSSQL 데이터베이스 카탈로그를 읽고,
-환경 변수가 없으면 엔터프라이즈 데이터 웨어하우스 Mock 스키마(D_ / F_ 테이블)를 제공하여
-라이브 소스 기능을 즉시 테스트할 수 있게 한다.
+접속 정보는 환경 변수로만 받는다. 데모라도 자격 증명을 소스에 두지 않는다.
+
+접속이 안 되면 **가짜 스키마로 대신하지 않는다.** 한때 그렇게 했었고, 화면은
+"데이터베이스 연결"이라고 말하면서 지어낸 6개 테이블을 보여 줬다. 읽는 사람은
+자기 데이터베이스를 보고 있다고 믿는데 실제로는 아무 관계도 없는 숫자였다.
+연결이 없으면 없다고 말하고 예제 DDL 쪽으로 보내는 편이 낫다 — 그쪽은 적어도
+예제라고 이름이 붙어 있다.
 """
 
 from __future__ import annotations
@@ -11,7 +15,6 @@ import functools
 import os
 
 from tablefold.graph.from_keys import infer_from_primary_keys
-from tablefold.introspect.ddl import DDLIntrospector
 from tablefold.introspect.mssql import MSSQLIntrospector
 from tablefold.schema.ir import ForeignKey, PhysicalSchema
 
@@ -40,6 +43,20 @@ def _connect():
 
 
 def available() -> bool:
+    """실제로 붙을 수 있을 때만 참.
+
+    환경 변수만 보고 참을 돌려주면, 값이 틀렸거나 데이터베이스가 꺼져 있을 때
+    화면이 "연결됨"이라고 말한 뒤 조회 단계에서야 터진다. 여기서 한 번 붙어
+    본다 — 화면이 켜질 때 한 번이라 비용은 무시할 만하다.
+    """
+    if not available_real_db():
+        return False
+    try:
+        connect = _connect()
+        conn = connect()
+    except Exception:  # noqa: BLE001 — 접속 실패의 종류는 여기서 중요하지 않다
+        return False
+    conn.close()
     return True
 
 
@@ -53,61 +70,14 @@ def render_ddl(schema: PhysicalSchema) -> str:
     return "\n\n".join(blocks)
 
 
-_MOCK_DWH_DDL = """
-CREATE TABLE D_CUSTOMER (
-  CUSTOMER_ID INT PRIMARY KEY,
-  CUSTOMER_NAME VARCHAR(100),
-  TIER_CODE VARCHAR(20),
-  REGION_ID INT
-);
-
-CREATE TABLE D_PRODUCT (
-  PRODUCT_ID INT PRIMARY KEY,
-  PRODUCT_NAME VARCHAR(200),
-  CATEGORY_ID INT,
-  UNIT_PRICE DECIMAL(10,2)
-);
-
-CREATE TABLE D_STORE (
-  STORE_ID INT PRIMARY KEY,
-  STORE_NAME VARCHAR(100),
-  CITY VARCHAR(50)
-);
-
-CREATE TABLE D_PROMOTION (
-  PROMOTION_ID INT PRIMARY KEY,
-  PROMO_NAME VARCHAR(100),
-  DISCOUNT_PCT DECIMAL(5,2)
-);
-
-CREATE TABLE F_SALES_TRANSACTION (
-  TX_ID INT PRIMARY KEY,
-  TX_DATE DATE,
-  CUSTOMER_ID INT,
-  PRODUCT_ID INT,
-  STORE_ID INT,
-  PROMOTION_ID INT,
-  QUANTITY INT,
-  SALES_AMOUNT DECIMAL(12,2),
-  NET_PROFIT DECIMAL(12,2)
-);
-
-CREATE TABLE F_INVENTORY_SNAPSHOT (
-  SNAPSHOT_ID INT PRIMARY KEY,
-  SNAPSHOT_DATE DATE,
-  PRODUCT_ID INT,
-  STORE_ID INT,
-  STOCK_QTY INT,
-  REORDER_LEVEL INT
-);
-"""
-
-
 def load(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
     """스키마를 읽고, 데이터로 검증한 외래 키를 붙여 돌려준다."""
-    if available_real_db():
-        return _load_real(schema_name)
-    return _load_mock(schema_name)
+    if not available_real_db():
+        raise LiveUnavailable(
+            "데이터베이스 접속 정보가 없습니다. "
+            "TABLEFOLD_MSSQL_HOST / PORT / USER / PASSWORD / DB 를 설정하세요."
+        )
+    return _load_real(schema_name)
 
 
 def available_real_db() -> bool:
@@ -115,75 +85,6 @@ def available_real_db() -> bool:
         os.environ.get("TABLEFOLD_MSSQL_HOST")
         and os.environ.get("TABLEFOLD_MSSQL_DB")
     )
-
-
-def _load_mock(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
-    schema = DDLIntrospector(_MOCK_DWH_DDL).introspect()
-    dims = tuple(t.name for t in schema.tables if t.name.upper().startswith("D_"))
-    facts = tuple(t.name for t in schema.tables if t.name.upper().startswith("F_"))
-
-    recovered = (
-        ForeignKey(
-            from_table="F_SALES_TRANSACTION",
-            from_columns=("CUSTOMER_ID",),
-            to_table="D_CUSTOMER",
-            to_columns=("CUSTOMER_ID",),
-            inferred=True,
-            confidence=0.95
-        ),
-        ForeignKey(
-            from_table="F_SALES_TRANSACTION",
-            from_columns=("PRODUCT_ID",),
-            to_table="D_PRODUCT",
-            to_columns=("PRODUCT_ID",),
-            inferred=True,
-            confidence=0.95
-        ),
-        ForeignKey(
-            from_table="F_SALES_TRANSACTION",
-            from_columns=("STORE_ID",),
-            to_table="D_STORE",
-            to_columns=("STORE_ID",),
-            inferred=True,
-            confidence=0.95
-        ),
-        ForeignKey(
-            from_table="F_SALES_TRANSACTION",
-            from_columns=("PROMOTION_ID",),
-            to_table="D_PROMOTION",
-            to_columns=("PROMOTION_ID",),
-            inferred=True,
-            confidence=0.95
-        ),
-        ForeignKey(
-            from_table="F_INVENTORY_SNAPSHOT",
-            from_columns=("PRODUCT_ID",),
-            to_table="D_PRODUCT",
-            to_columns=("PRODUCT_ID",),
-            inferred=True,
-            confidence=0.95
-        ),
-        ForeignKey(
-            from_table="F_INVENTORY_SNAPSHOT",
-            from_columns=("STORE_ID",),
-            to_table="D_STORE",
-            to_columns=("STORE_ID",),
-            inferred=True,
-            confidence=0.95
-        )
-    )
-
-    meta = {
-        "database": "ENTERPRISE_DWH_SIMULATED",
-        "schema": schema_name,
-        "dimensions": list(dims),
-        "facts": list(facts),
-        "declared_fk_count": 0,
-        "candidate_fk_count": len(recovered),
-        "recovered_fk_count": len(recovered),
-        "ddl": render_ddl(schema),
-    }
-    return schema.with_foreign_keys(schema.foreign_keys + recovered), meta
 
 
 def _load_real(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:

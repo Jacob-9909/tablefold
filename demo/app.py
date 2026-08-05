@@ -82,7 +82,7 @@ def list_sources() -> dict[str, Any]:
     """어떤 스키마 소스를 쓸 수 있는지."""
     return {
         "live_available": live.available(),
-        "live_label": os.environ.get("TABLEFOLD_MSSQL_DB", "ENTERPRISE_DWH_SIMULATED"),
+        "live_label": os.environ.get("TABLEFOLD_MSSQL_DB", ""),
     }
 
 
@@ -155,13 +155,21 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
         # 1. 외래키 추론 — 라이브 소스는 이미 데이터로 검증된 키를 들고 온다.
         if fold_options.get("infer_missing_keys"):
             inferred = infer_foreign_keys(raw_schema)
+            declared_only = raw_schema.foreign_keys
             enriched_schema = (
                 raw_schema.with_foreign_keys(raw_schema.foreign_keys + inferred)
                 if inferred
                 else raw_schema
             )
         else:
-            inferred = raw_schema.foreign_keys
+            # 라이브 소스는 이미 데이터로 검증된 키를 붙여서 온다. 그 키들은
+            # 데이터베이스에 *선언된* 것이 아니라 되찾은 것이므로 추론 쪽으로만
+            # 센다. 양쪽에 다 넣으면 같은 관계가 두 번 세어져, 화면의 "AI가 직접
+            # 이어붙여야 하는 표"가 22 대신 44 로 나온다.
+            inferred = tuple(fk for fk in raw_schema.foreign_keys if fk.inferred)
+            declared_only = tuple(
+                fk for fk in raw_schema.foreign_keys if not fk.inferred
+            )
             enriched_schema = raw_schema
 
         # 2. 그래프 구축 및 프로파일링 (Fact Score)
@@ -338,7 +346,7 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
             "physical": {
                 "table_count": len(raw_schema.tables),
                 "total_columns": sum(len(t.columns) for t in raw_schema.tables),
-                "declared_fk_count": len(raw_schema.foreign_keys),
+                "declared_fk_count": len(declared_only),
                 "inferred_fk_count": len(inferred),
                 "inferred_fks": inferred_fks_detailed,
                 "tables": physical_tables_detailed,
