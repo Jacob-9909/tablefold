@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from tablefold.graph import SchemaGraph
-from tablefold.introspect.ddl import DDLIntrospector
 from tablefold.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
+from tablefold.read.ddl import DDLIntrospector
+from tablefold.relate.graph import SchemaGraph
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 

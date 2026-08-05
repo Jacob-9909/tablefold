@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import pytest
-from tablefold.classify import profile_tables
-from tablefold.cluster import SelectionPolicy, cluster
-from tablefold.compose import ComposeOptions, compose
+
+from tablefold.build.compose import ComposeOptions, compose
+from tablefold.choose.classify import profile_tables
+from tablefold.choose.cluster import SelectionPolicy, cluster
 from tablefold.ir import Cardinality, FieldKind
 
 

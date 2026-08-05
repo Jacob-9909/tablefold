@@ -4,15 +4,15 @@ from dataclasses import replace
 
 import pytest
 
-from tablefold.classify import FACT_THRESHOLD, TableRole, profile_tables
-from tablefold.cluster import (
+from tablefold.choose.classify import FACT_THRESHOLD, TableRole, profile_tables
+from tablefold.choose.cluster import (
     SelectionPolicy,
     StopReason,
     cluster,
     reachable_tables,
 )
-from tablefold.graph import SchemaGraph
 from tablefold.ir import PhysicalColumn, PhysicalTable
+from tablefold.relate.graph import SchemaGraph
 
 
 def _profile(graph, name):
@@ -235,7 +235,7 @@ def test_every_area_is_priced_at_what_it_will_actually_cost(retail_graph):
     """Selection prices models it has not built. The estimate has to be the
     same rules ``compose`` builds from, or the objective optimises against a
     model nobody produces."""
-    from tablefold.compose import compose
+    from tablefold.build.compose import compose
 
     result = cluster(retail_graph, profile_tables(retail_graph))
     layer = compose(retail_graph, result)

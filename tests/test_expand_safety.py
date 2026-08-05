@@ -7,11 +7,11 @@
 from __future__ import annotations
 
 import pytest
-from tablefold.cluster import SelectionPolicy
-from tablefold.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
 
-from tablefold.expansion.expand import ExpansionError, expand
-from tablefold.pipeline import fold
+from tablefold.choose.cluster import SelectionPolicy
+from tablefold.fold import fold
+from tablefold.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
+from tablefold.rewrite.expand import ExpansionError, expand
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def filtered_fold():
         tables=(orders, lines),
         foreign_keys=(ForeignKey("order_lines", ("order_id",), "orders", ("id",)),),
     )
-    from tablefold.clustering.select import ExplicitSelector
+    from tablefold.choose.select import ExplicitSelector
 
     # 앵커를 못 박는다. 탐욕 선택은 두 테이블짜리 스키마에서 자식 쪽을 고를 수도
     # 있는데, 그러면 검증하려는 사전집계 구조가 아예 안 생긴다.
@@ -199,6 +199,7 @@ def test_an_ambiguous_filter_name_is_not_pushed_to_a_guess(tiny_graph):
     모델의 서브쿼리로 조건이 조용히 옮겨갔다.
     """
     import sqlglot
+
     from tablefold.ir import (
         Cardinality,
         FieldKind,
@@ -207,8 +208,7 @@ def test_an_ambiguous_filter_name_is_not_pushed_to_a_guess(tiny_graph):
         LogicalField,
         LogicalModel,
     )
-
-    from tablefold.expansion.expand import _pushdown
+    from tablefold.rewrite.expand import _pushdown
 
     step = JoinStep("a", ("id",), "child", ("a_id",), Cardinality.ONE_TO_MANY)
     field = LogicalField(
@@ -238,8 +238,8 @@ def test_pricing_matches_what_compose_actually_builds(retail_schema):
     필터 전용 필드를 세지 않던 동안 ``customers`` 는 27 로 값이 매겨졌고
     실제로는 64 개 필드를 냈다.
     """
-    from tablefold.graph import SchemaGraph as SG
-    from tablefold.presentation.cost import estimate_fields
+    from tablefold.choose.cost import estimate_fields
+    from tablefold.relate.graph import SchemaGraph as SG
 
     graph = SG.build(retail_schema)
     result = fold(
@@ -312,7 +312,7 @@ def test_fact_score_is_not_flattened_when_no_row_counts_exist(retail_graph):
     상수를 더하는 것은 순위를 바꾸지 않으면서 가중치의 15%를 죽이고 임계값만
     위로 민다. 그 경우 항을 빼고 나머지를 다시 정규화해야 한다.
     """
-    from tablefold.classify import (
+    from tablefold.choose.classify import (
         _W_MEASURE,
         _W_OUT_DEGREE,
         _W_TEMPORAL,
@@ -375,7 +375,7 @@ def _two_paths_to_one_table():
 def test_a_second_fk_to_the_same_table_is_not_swallowed():
     """``walk_many_to_one`` 이 테이블 단위로 방문을 기록하던 동안, 먼저 도달한
     경로가 대상을 소진해 판매자 정보가 모델에서 통째로 사라졌다."""
-    from tablefold.clustering.select import ExplicitSelector
+    from tablefold.choose.select import ExplicitSelector
 
     result = fold(
         _two_paths_to_one_table(),
@@ -391,7 +391,7 @@ def test_a_second_fk_to_the_same_table_is_not_swallowed():
 def test_each_path_joins_on_its_own_key():
     """별칭이 대상 테이블 이름만으로 만들어지던 동안 두 경로가 한 별칭으로
     뭉개져, 두 필드가 같은 조인에서 나왔다."""
-    from tablefold.clustering.select import ExplicitSelector
+    from tablefold.choose.select import ExplicitSelector
 
     result = fold(
         _two_paths_to_one_table(),
@@ -413,7 +413,7 @@ def test_each_path_joins_on_its_own_key():
 def test_two_child_fks_get_two_subqueries():
     """자식이 부모를 두 키로 참조할 때 하나의 서브쿼리로 뭉치면, 두 집계가
     같은 ``GROUP BY`` 에서 나와 같은 값이 두 번 출력된다 — 에러 없이."""
-    from tablefold.clustering.select import ExplicitSelector
+    from tablefold.choose.select import ExplicitSelector
 
     orders = PhysicalTable(
         name="orders",
@@ -468,7 +468,7 @@ def test_generic_primary_keys_do_not_become_a_clique():
     허용하면 ``id`` 를 쓰는 모든 테이블이 서로를 참조하는 완전 그래프가 된다 —
     테이블 3개에서 가짜 엣지 6개.
     """
-    from tablefold.graph.from_keys import infer_from_primary_keys
+    from tablefold.relate.keys import infer_from_primary_keys
 
     def table(name):
         return PhysicalTable(
@@ -490,7 +490,7 @@ def test_generic_primary_keys_do_not_become_a_clique():
 def test_a_selector_cannot_hide_a_model_behind_a_duplicate_name():
     """이름이 겹치면 ``layer.model()`` 이 첫 번째만 돌려주고, 두 번째 모델은
     있다고 보고되면서 이름으로 닿을 수 없게 된다."""
-    from tablefold.clustering.select import Choice, Selection, StopReason
+    from tablefold.choose.select import Choice, Selection, StopReason
 
     class SameName:
         def select(self, lattice, policy):
@@ -532,9 +532,8 @@ def test_a_tables_score_does_not_depend_on_another_tables_statistics():
     테이블 하나가 통계를 갖고 있느냐에 따라 같은 테이블이 FACT 와 DIMENSION
     사이를 오갔다. 자기 자신에 대해 달라진 것이 없는데도.
     """
-    from tablefold.classify import profile_tables
-
-    from tablefold.graph import SchemaGraph as SG
+    from tablefold.choose.classify import profile_tables
+    from tablefold.relate.graph import SchemaGraph as SG
 
     orders = PhysicalTable(
         name="orders",
@@ -644,9 +643,9 @@ def test_pruning_drops_anchors_that_buy_nothing(retail_schema):
     10개 중 5개는 답할 수 있는 질문을 하나도 늘리지 않았다. 빼도 답변가능률은
     그대로여야 하고, 모델과 프롬프트만 줄어야 한다.
     """
-    from tablefold.clustering.select import ExplicitSelector
-    from tablefold.presentation import emit
-    from tablefold.presentation import fidelity as fid
+    from tablefold.choose.select import ExplicitSelector
+    from tablefold.report import fidelity as fid
+    from tablefold.report import prompt as emit
 
     every = [t.name for t in retail_schema.tables]
 
@@ -674,8 +673,8 @@ def test_pruning_keeps_every_table_covered(retail_schema):
 
     쌍만 보고 빼면 그런 테이블을 유일하게 담은 앵커가 조용히 사라진다.
     """
-    from tablefold.clustering.select import ExplicitSelector
-    from tablefold.presentation import fidelity as fid
+    from tablefold.choose.select import ExplicitSelector
+    from tablefold.report import fidelity as fid
 
     every = [t.name for t in retail_schema.tables]
     result = fold(
@@ -699,7 +698,7 @@ def test_pruning_keeps_every_table_covered(retail_schema):
 
 def test_pruning_is_off_by_default(retail_schema):
     """호출자가 이름을 지목했으면 기본값은 그대로 두는 것이다."""
-    from tablefold.clustering.select import ExplicitSelector
+    from tablefold.choose.select import ExplicitSelector
 
     names = [t.name for t in retail_schema.tables[:5]]
     result = fold(
@@ -753,7 +752,7 @@ def _org_pl_acct_schema():
 
 
 def _org_anchored():
-    from tablefold.clustering.select import ExplicitSelector
+    from tablefold.choose.select import ExplicitSelector
 
     return fold(
         _org_pl_acct_schema(),

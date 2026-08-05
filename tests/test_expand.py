@@ -3,11 +3,12 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-from tablefold.classify import profile_tables
-from tablefold.cluster import SelectionPolicy, cluster
-from tablefold.compose import ComposeOptions, compose
-from tablefold.expand import ExpansionError, expand
+
+from tablefold.build.compose import ComposeOptions, compose
+from tablefold.choose.classify import profile_tables
+from tablefold.choose.cluster import SelectionPolicy, cluster
 from tablefold.ir import FieldKind
+from tablefold.rewrite.expand import ExpansionError, expand
 
 
 @pytest.fixture

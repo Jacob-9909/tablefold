@@ -4,10 +4,10 @@ import json
 
 import pytest
 
-from tablefold.classify import profile_tables
-from tablefold.cluster import build_lattice, cluster
-from tablefold.compose import compose
-from tablefold.select import (
+from tablefold.build.compose import compose
+from tablefold.choose.classify import profile_tables
+from tablefold.choose.cluster import build_lattice, cluster
+from tablefold.choose.select import (
     Choice,
     GreedySelector,
     LLMSelector,
@@ -207,7 +207,7 @@ def test_a_model_can_be_named_for_what_it_is_about(retail_graph):
 
 def test_fold_takes_a_selector(retail_schema):
     """The whole pipeline, with the choice made from outside it."""
-    from tablefold.pipeline import fold
+    from tablefold.fold import fold
 
     result = fold(
         retail_schema,

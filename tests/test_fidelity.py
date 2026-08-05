@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import pytest
-from tablefold.classify import profile_tables
-from tablefold.cluster import SelectionPolicy, cluster
-from tablefold.compose import ComposeOptions, compose
 
-from tablefold.presentation import fidelity as fid
+from tablefold.build.compose import ComposeOptions, compose
+from tablefold.choose.classify import profile_tables
+from tablefold.choose.cluster import SelectionPolicy, cluster
+from tablefold.report import fidelity as fid
 
 
 def _layer(graph, *, max_areas: int = 2, **compose_kwargs):

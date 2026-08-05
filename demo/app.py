@@ -12,17 +12,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from demo import live
-from tablefold import emit
-from tablefold.clustering.cluster import SelectionPolicy, build_lattice
-from tablefold.clustering.select import ExplicitSelector
-from tablefold.expansion.expand import ExpansionError, expand
-from tablefold.graph.graph import SchemaGraph, infer_foreign_keys
-from tablefold.introspect.ddl import DDLIntrospector
-from tablefold.pipeline.pipeline import fold
-from tablefold.presentation import fidelity as fid
-from tablefold.presentation import lineage as lin
-from tablefold.presentation.cost import DEFAULT_FIELD_BUDGET, MAX_MODEL_FIELDS
-from tablefold.scoring.classify import profile_tables
+from tablefold.choose.classify import profile_tables
+from tablefold.choose.cluster import SelectionPolicy, build_lattice
+from tablefold.choose.cost import DEFAULT_FIELD_BUDGET, MAX_MODEL_FIELDS
+from tablefold.choose.select import ExplicitSelector
+from tablefold.fold import fold
+from tablefold.read.ddl import DDLIntrospector
+from tablefold.relate.graph import SchemaGraph, infer_foreign_keys
+from tablefold.report import fidelity as fid
+from tablefold.report import lineage as lin
+from tablefold.report import prompt as emit
+from tablefold.rewrite.expand import ExpansionError, expand
 
 BASE_DIR = Path(__file__).parent.parent
 FIXTURES_DIR = BASE_DIR / "fixtures"

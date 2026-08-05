@@ -15,9 +15,9 @@ import functools
 import os
 from dataclasses import replace
 
-from tablefold.graph.from_keys import infer_from_primary_keys
-from tablefold.introspect.mssql import MSSQLIntrospector
-from tablefold.schema.ir import ForeignKey, PhysicalSchema
+from tablefold.ir import ForeignKey, PhysicalSchema
+from tablefold.read.mssql import MSSQLIntrospector
+from tablefold.relate.keys import infer_from_primary_keys
 
 VIOLATION_TOLERANCE = 0.01
 

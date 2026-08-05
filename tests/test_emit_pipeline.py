@@ -4,13 +4,13 @@ import json
 
 import pytest
 import yaml
-from tablefold.cluster import SelectionPolicy
-from tablefold.ir import FieldKind
 from typer.testing import CliRunner
 
-from tablefold import emit
+from tablefold.choose.cluster import SelectionPolicy
 from tablefold.cli import app
-from tablefold.pipeline import fold
+from tablefold.fold import fold
+from tablefold.ir import FieldKind
+from tablefold.report import prompt as emit
 from tests.conftest import FIXTURES
 
 runner = CliRunner()

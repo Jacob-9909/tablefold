@@ -7,7 +7,7 @@ arriving as several rows that have to be regrouped in order.
 
 from __future__ import annotations
 
-from tablefold.introspect.postgres import _assemble
+from tablefold.read.postgres import _assemble
 
 TABLE_ROWS = [
     ("orders", "Customer orders", 120_000),
@@ -102,8 +102,8 @@ def test_tables_with_no_readable_columns_are_dropped():
 
 
 def test_assembled_schema_folds():
-    from tablefold.cluster import SelectionPolicy
-    from tablefold.pipeline import fold
+    from tablefold.choose.cluster import SelectionPolicy
+    from tablefold.fold import fold
 
     schema = _assemble("public", TABLE_ROWS, COLUMN_ROWS, PK_ROWS, FK_ROWS)
     result = fold(schema, policy=SelectionPolicy(max_areas=1))

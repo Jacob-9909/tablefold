@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tablefold.introspect.ddl import DDLIntrospector
+from tablefold.read.ddl import DDLIntrospector
 
 INLINE_DDL = """
 CREATE TABLE teams (

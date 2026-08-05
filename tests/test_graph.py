@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from tablefold.ir import Cardinality, name_aliases, singular
 
-from tablefold.graph import infer_foreign_keys
+from tablefold.ir import Cardinality, name_aliases, singular
+from tablefold.relate.graph import infer_foreign_keys
 
 
 def test_degrees_follow_key_direction(tiny_graph):
