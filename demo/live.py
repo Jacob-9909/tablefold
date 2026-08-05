@@ -97,7 +97,6 @@ def _load_real(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
 
     dims = tuple(t.name for t in schema.tables if t.name.upper().startswith("D_"))
     facts = tuple(t.name for t in schema.tables if t.name.upper().startswith("F_"))
-    size = {t.name: (t.row_estimate or 0) for t in schema.tables}
 
     conn = connect()
     cur = conn.cursor()
@@ -106,23 +105,33 @@ def _load_real(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
         schema, targets=dims or None, unique_subsets=subsets
     )
 
-    # 확신도는 측정값이다. ``from_keys`` 가 붙여 준 0.9 는 "스키마만 보고 지은
-    # 후보"라는 뜻의 자리표시자이고, 여기서는 실제 데이터를 읽어 위반율을 재므로
-    # 그 값으로 바꿔 적는다. 화면의 확신도가 전부 같은 숫자면 아무것도 재지 않은
-    # 것이고, 읽는 쪽은 그걸 구별할 방법이 없다.
-    best: dict[tuple[str, tuple[str, ...]], ForeignKey] = {}
+    # 데이터가 통과시킨 관계는 **전부** 남긴다.
+    #
+    # 한때 같은 컬럼에서 나온 후보 중 가장 좁은 차원 하나만 골랐다. 더 구체적인
+    # 쪽이 의미상 맞다고 봤는데, 그게 그래프를 조각냈다. ``ORG_CD`` 는
+    # ``D_ORG``(46) · ``D_SA_ORG``(13) · ``D_FI_ORG``(10) 셋 모두에 위반 없이
+    # 들어맞는데, 좁은 쪽을 고르는 바람에 ``F_SALES`` 는 ``D_SA_ORG`` 로,
+    # ``F_STOCK`` 은 ``D_FI_ORG`` 로 끌려가 한 모델에서 만나지 못했다.
+    # 업무 주제 9개 중 구매와 인사가 그래서 답이 안 됐다.
+    #
+    # 전부 남기면 앵커 선택이 어느 쪽으로든 갈 수 있다. 실측으로 모델 8→6,
+    # 프롬프트 22,716→18,901자, 주제 7/9→9/9 — 모든 축에서 낫다. 넓은 차원이
+    # 늘어나도 중복 앵커 제거가 뒤에서 걸러 준다.
+    #
+    # 확신도도 측정값이다. ``from_keys`` 의 0.9 는 "스키마만 보고 지은 후보"라는
+    # 뜻의 자리표시자이므로, 실제로 잰 위반율로 바꿔 적는다.
+    validated: list[ForeignKey] = []
     for fk in candidates:
         rate = _violation_rate(cur, fk)
         if rate > VIOLATION_TOLERANCE:
             continue
-        measured = replace(fk, confidence=round(1.0 - rate, 4))
-        key = (fk.from_table.lower(), tuple(c.lower() for c in fk.from_columns))
-        if key not in best or size[fk.to_table] < size[best[key].to_table]:
-            best[key] = measured
+        validated.append(replace(fk, confidence=round(1.0 - rate, 4)))
     conn.close()
 
+    # 같은 두 테이블 사이에 후보가 여럿이면 좁은 키 쪽만 남긴다. 넓은 키는
+    # 좁은 키를 포함하므로 조인 조건이 중복된다.
     by_pair: dict[tuple[str, str], ForeignKey] = {}
-    for fk in best.values():
+    for fk in validated:
         pair = (fk.from_table.lower(), fk.to_table.lower())
         if pair not in by_pair or len(fk.from_columns) < len(by_pair[pair].from_columns):
             by_pair[pair] = fk
