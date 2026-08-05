@@ -36,6 +36,40 @@ from tablefold.schema.ir import (
 
 _BASE_ALIAS = "base"
 
+# 인용하지 않으면 파서가 문법 요소로 읽어 버리는 이름들.
+#
+# sqlglot 은 방언별 예약어 목록을 노출하지 않는다 (``RESERVED_KEYWORDS`` 가 비어
+# 있다). 전부 인용하는 방법도 있지만, PostgreSQL 에서 인용은 대소문자를 고정시켜
+# 카탈로그에 저장된 이름과 어긋날 위험을 만든다. 그래서 실제 스키마에 컬럼/테이블
+# 이름으로 등장하는 예약어만 골라 인용한다.
+#
+# 목록에 없는 예약어는 여전히 터진다. 다만 터지지 조용히 틀리지는 않으므로,
+# 없는 것을 발견하면 여기 추가하면 된다. (``plan`` 은 T-SQL 에서 실제로 부딪혔다.)
+_NEEDS_QUOTING = frozenset(
+    {
+        "all", "and", "any", "as", "asc", "between", "by", "case", "cast", "check",
+        "column", "constraint", "create", "cross", "current", "current_date",
+        "current_time", "current_timestamp", "current_user", "default", "desc",
+        "distinct", "do", "else", "end", "except", "exists", "false", "for",
+        "foreign", "from", "full", "grant", "group", "having", "in", "index",
+        "inner", "insert", "intersect", "into", "is", "join", "key", "left",
+        "like", "limit", "natural", "not", "null", "offset", "on", "only", "or",
+        "order", "outer", "plan", "primary", "references", "returning", "right",
+        "rows", "select", "session_user", "set", "some", "table", "then", "to",
+        "true", "union", "unique", "update", "user", "using", "values", "when",
+        "where", "window", "with",
+    }
+)
+
+
+def _ident(name: str) -> exp.Identifier:
+    """스키마에서 읽은 이름을 식별자로. 예약어면 인용한다.
+
+    우리가 만든 별칭(``base``, ``j_...``, ``agg_...``)에는 쓰지 않는다. 그쪽은
+    구성상 안전하고, 인용하면 결과 SQL 만 읽기 나빠진다.
+    """
+    return exp.to_identifier(name, quoted=name.lower() in _NEEDS_QUOTING)
+
 # CTEs are named with this prefix rather than the model's own name. A model is
 # usually named after its anchor table, and a CTE named `orders` whose body
 # reads `FROM orders` is a self-reference — the physical table becomes
@@ -77,12 +111,15 @@ def expand(
     except Exception as exc:  # noqa: BLE001 - surfaced as a domain error
         raise ExpansionError(f"could not parse SQL: {exc}") from exc
 
+    _reject_shadowing_ctes(statement, layer, graph)
+
     referenced = _referenced_models(statement, layer)
     if not referenced:
         raise ExpansionError(
             "query references no logical model; "
             f"known models: {', '.join(m.name for m in layer.models)}"
         )
+    _reject_multiple_models(statement, layer)
 
     mentioned = _mentioned_columns(statement)
     selects_star = _selects_star(statement)
@@ -92,17 +129,32 @@ def expand(
     emitted = 0
     available = 0
 
-    unknown = _unknown_columns(mentioned, referenced)
+    # 모르는 컬럼은 하나라도 있으면 거부한다.
+    #
+    # 예전에는 "매칭된 필드가 하나도 없을 때"만 거부했는데, 그러면 아는 컬럼과
+    # 모르는 컬럼이 섞인 질의가 조용히 통과했다. 모르는 컬럼은 CTE에 투영되지
+    # 않으므로 결과 SQL은 그 이름을 해석할 수 없고, 실패는 여기가 아니라
+    # 데이터베이스에서 일어난다. 이름을 지어낸 곳에서 멀리 떨어진 지점이다.
+    unknown = _unknown_columns(mentioned, referenced) - _usable_aliases(statement)
+    if unknown and not selects_star:
+        known = sorted({n for m in referenced for n in m.field_names})
+        raise ExpansionError(
+            f"query references unknown fields: {', '.join(sorted(unknown))}; "
+            f"models: {', '.join(m.name for m in referenced)}; "
+            f"available: {', '.join(known[:12])}…"
+        )
+
+    # 필터 전용 필드에 걸린 조건은 집계 서브쿼리 안으로 옮긴다. 바깥에 남으면
+    # 이미 집계된 값에 조건을 거는 셈이라 뜻이 달라진다.
+    statement, pushed = _pushdown(statement, referenced)
+    _reject_unpushable(statement, referenced)
 
     for model in referenced:
         fields = _required_fields(model, mentioned, star=selects_star)
-        if not fields and unknown:
-            raise ExpansionError(
-                f"query references model '{model.name}' but none of its fields; "
-                f"unknown: {', '.join(sorted(unknown))}; "
-                f"available: {', '.join(model.field_names[:12])}…"
-            )
-        select, join_count = _build_model_select(model, graph, fields)
+        _reject_projected_filters(model, statement, fields)
+        select, join_count = _build_model_select(
+            model, graph, fields, pushed=pushed
+        )
         ctes.append((model.name, select))
         used_fields.extend(f"{model.name}.{f.name}" for f in fields)
         emitted += join_count
@@ -128,11 +180,76 @@ def _referenced_models(
     statement: exp.Expression, layer: LogicalLayer
 ) -> tuple[LogicalModel, ...]:
     found: list[LogicalModel] = []
-    for table in statement.find_all(exp.Table):
+    for table in _model_table_nodes(statement, layer):
         model = layer.model(table.name)
         if model is not None and all(m.name != model.name for m in found):
             found.append(model)
     return tuple(found)
+
+
+def _model_table_nodes(
+    statement: exp.Expression, layer: LogicalLayer
+) -> list[exp.Table]:
+    return [t for t in statement.find_all(exp.Table) if layer.model(t.name) is not None]
+
+
+def _cte_names(statement: exp.Expression) -> set[str]:
+    """질의가 스스로 정의한 CTE 이름들."""
+    return {
+        cte.alias_or_name.lower()
+        for with_ in statement.find_all(exp.With)
+        for cte in with_.expressions
+        if cte.alias_or_name
+    }
+
+
+def _reject_shadowing_ctes(
+    statement: exp.Expression, layer: LogicalLayer, graph: SchemaGraph
+) -> None:
+    """질의의 CTE 가 모델이나 물리 테이블 이름을 가리면 거부한다.
+
+    ``WITH products AS (...)`` 를 쓰면 확장이 만드는 ``FROM products AS base`` 가
+    물리 테이블이 아니라 그 CTE 를 읽는다. 데이터베이스는 정상적으로 실행하고
+    엉뚱한 원본에서 뽑은 값을 돌려준다 — 에러 없이 틀리는 종류다.
+
+    ``_CTE_PREFIX`` 는 *우리가* 만든 CTE 와 물리 테이블의 충돌만 막는다. 질의가
+    들고 온 이름까지는 막지 못하므로 여기서 거른다.
+    """
+    defined = _cte_names(statement)
+    if not defined:
+        return
+
+    physical = {t.name.lower() for t in graph.schema.tables}
+    models = {m.name.lower() for m in layer.models}
+    clashes = sorted(defined & (physical | models))
+    if clashes:
+        raise ExpansionError(
+            f"CTE names shadow real tables or models: {', '.join(clashes)}; "
+            "rename them — the expansion reads those names from the database"
+        )
+
+
+def _reject_multiple_models(statement: exp.Expression, layer: LogicalLayer) -> None:
+    """모델을 두 번 이상 참조하면 거부한다.
+
+    와이드 모델은 조인을 없애려고 존재한다. 두 모델을 ``JOIN`` 하면 그 문제가
+    그대로 돌아오고, 게다가 두 모델이 같은 필드 이름을 가지면(retail 의 ``orders``
+    와 ``products`` 는 8개를 공유한다) 확장 결과의 바깥 ``SELECT`` 가 한정자 없이
+    모호해져 데이터베이스에서 터진다.
+
+    세는 것은 테이블 *노드* 가 아니라 서로 다른 *모델* 의 수다. 노드를 세면
+    ``WHERE amount > (SELECT AVG(amount) FROM orders)`` 처럼 같은 모델을 스칼라
+    서브쿼리에서 다시 읽는 정상 질의가 막힌다 — 그 참조들은 모두 같은 CTE 를
+    가리키므로 모호할 것이 없다.
+    """
+    named = sorted({t.name for t in _model_table_nodes(statement, layer)})
+    if len(named) <= 1:
+        return
+    raise ExpansionError(
+        f"query references {len(named)} models ({', '.join(named)}); "
+        "a wide model is meant to answer on its own — read one model per query. "
+        "If the question spans both, the layer needs an anchor holding them together"
+    )
 
 
 def _mentioned_columns(statement: exp.Expression) -> frozenset[str]:
@@ -163,8 +280,138 @@ def _required_fields(
     model: LogicalModel, mentioned: frozenset[str], *, star: bool
 ) -> tuple[LogicalField, ...]:
     if star:
-        return model.fields
+        # `SELECT *` 는 필터 전용 필드를 포함하지 않는다. 값으로 꺼낼 수 없는
+        # 필드이므로 투영 목록에 들어가면 확장 자체가 깨진다.
+        return tuple(f for f in model.fields if not f.filter_only)
     return tuple(f for f in model.fields if f.name.lower() in mentioned)
+
+
+# ── 술어 밀어넣기 ─────────────────────────────────────────────────────────────
+
+
+def _split_conjuncts(where: exp.Expression | None) -> list[exp.Expression]:
+    """WHERE 절을 AND 로 끊는다. OR 아래는 쪼개지 않는다."""
+    if where is None:
+        return []
+    node = where.this if isinstance(where, exp.Where) else where
+    if isinstance(node, exp.And):
+        return _split_conjuncts(node.this) + _split_conjuncts(node.expression)
+    return [node]
+
+
+def _pushdown(
+    statement: exp.Expression, models: tuple[LogicalModel, ...]
+) -> tuple[exp.Expression, dict[tuple[str, str], list[exp.Expression]]]:
+    """필터 전용 필드에 걸린 조건을 해당 집계 서브쿼리로 옮긴다.
+
+    사전집계된 값에는 기간을 걸 수 없다 — ``SUM(SALES_AMT)`` 은 이미 전 기간을
+    더한 뒤이기 때문이다. 조건을 집계 *안* 으로 밀어 넣어야 "이번 달 매출"이
+    성립한다. 그렇게 해도 서브쿼리는 여전히 부모 키당 한 행을 내므로 앵커의
+    입도는 그대로다.
+
+    AND 로 끊은 조각 단위로 옮긴다. 한 조각이 필터 전용 필드 하나만 참조하고
+    그 필드가 어느 자식에 속하는지 분명할 때만 옮기고, 나머지는 바깥에 남긴다.
+    OR 로 묶인 조건은 쪼개면 뜻이 달라지므로 손대지 않는다 — 그런 조건이 필터
+    전용 필드를 건드리면 :func:`expand` 가 거부한다.
+
+    반환값의 두 번째 항목은 ``(모델, 자식 테이블) -> 조건들`` 이다.
+    """
+    # 이름 하나에 여러 (모델, 필드) 가 걸릴 수 있다. 딕셔너리로 덮어쓰면 나중
+    # 것이 이기고, 조건이 사용자가 지목하지 않은 모델의 서브쿼리로 조용히
+    # 옮겨간다 — retail 에서 필터 전용 이름 15개가 두 모델에 겹친다.
+    #
+    # 지금은 :func:`_reject_multiple_models` 가 모델 하나만 허용하므로 실제로
+    # 겹칠 일이 없지만, 그 보장에 기대지 않는다. 모호하면 옮기지 않고 남기고,
+    # 남은 참조는 :func:`_reject_unpushable` 이 에러로 만든다.
+    by_name: dict[str, list[tuple[LogicalModel, LogicalField]]] = {}
+    for m in models:
+        for f in m.fields:
+            if f.filter_only and f.source.path:
+                by_name.setdefault(f.name.lower(), []).append((m, f))
+    if not by_name:
+        return statement, {}
+
+    rewritten = statement.copy()
+    pushed: dict[tuple[str, str], list[exp.Expression]] = {}
+
+    for select in rewritten.find_all(exp.Select):
+        where = select.args.get("where")
+        if where is None:
+            continue
+
+        keep: list[exp.Expression] = []
+        for part in _split_conjuncts(where):
+            columns = {c.name.lower() for c in part.find_all(exp.Column) if c.name}
+            names = columns & by_name.keys()
+            # 조각이 필터 전용 필드 하나만 참조해야 옮길 수 있다. 다른 컬럼이
+            # 섞여 있으면 (``a = 1 OR total > 10``) 옮기는 순간 그 컬럼이 자식
+            # 테이블에서 해석되어 뜻이 달라진다.
+            if len(names) != 1 or columns != names:
+                keep.append(part)
+                continue
+
+            owners = by_name[next(iter(names))]
+            if len(owners) != 1:
+                # 어느 모델의 필드인지 정할 수 없다. 옮기면 반쯤은 틀린다.
+                keep.append(part)
+                continue
+
+            model, field = owners[0]
+            moved = part.copy()
+            for column in moved.find_all(exp.Column):
+                if column.name.lower() == field.name.lower():
+                    column.set("this", _ident(field.source.column))
+                    column.set("table", None)
+            pushed.setdefault(
+                (model.name.lower(), field.source.path[0].to_table.lower()), []
+            ).append(moved)
+
+        select.set(
+            "where", exp.Where(this=_conjunction(keep)) if keep else None
+        )
+
+    return rewritten, pushed
+
+
+def _filter_only_names(models: tuple[LogicalModel, ...]) -> set[str]:
+    return {f.name.lower() for m in models for f in m.fields if f.filter_only}
+
+
+def _reject_unpushable(
+    statement: exp.Expression, models: tuple[LogicalModel, ...]
+) -> None:
+    """옮기지 못한 필터 전용 참조가 남아 있으면 거부한다.
+
+    바깥에 남은 참조는 CTE에 그 이름이 없으므로 데이터베이스에서 터진다.
+    조용히 통과시키느니 여기서 멈추는 편이 낫다.
+    """
+    leftover = {
+        c.name.lower() for c in statement.find_all(exp.Column) if c.name
+    } & _filter_only_names(models)
+    if leftover:
+        raise ExpansionError(
+            f"filter-only fields cannot be used here: {', '.join(sorted(leftover))}; "
+            "they may only appear in WHERE, joined by AND, one field per condition"
+        )
+
+
+def _reject_projected_filters(
+    model: LogicalModel, statement: exp.Expression, fields: tuple[LogicalField, ...]
+) -> None:
+    """필터 전용 필드를 SELECT 로 꺼내려 하면 거부한다."""
+    projected = {
+        c.name.lower()
+        for select in statement.find_all(exp.Select)
+        for projection in select.expressions
+        for c in projection.find_all(exp.Column)
+        if c.name
+    }
+    bad = projected & {f.name.lower() for f in fields if f.filter_only}
+    if bad:
+        raise ExpansionError(
+            f"model '{model.name}' fields {', '.join(sorted(bad))} are filter-only; "
+            "they carry no value at the model's grain and cannot be selected"
+        )
 
 
 def _unknown_columns(
@@ -172,6 +419,45 @@ def _unknown_columns(
 ) -> frozenset[str]:
     known = {name.lower() for model in models for name in model.field_names}
     return frozenset(mentioned - known)
+
+
+def _output_aliases(statement: exp.Expression) -> frozenset[str]:
+    """질의가 스스로 만든 이름들.
+
+    ``SELECT SUM(amt) AS revenue ... ORDER BY revenue`` 에서 ``revenue`` 는
+    컬럼 참조로 파싱되지만 모델의 필드가 아니다. 미지의 컬럼을 거부할 때
+    이런 이름까지 걸면 정상 질의가 막힌다.
+    """
+    found: set[str] = set()
+    for select in statement.find_all(exp.Select):
+        for projection in select.expressions:
+            if not isinstance(projection, exp.Alias):
+                continue
+            alias = projection.alias_or_name
+            if alias:
+                found.add(alias.lower())
+    return frozenset(found)
+
+
+def _usable_aliases(statement: exp.Expression) -> frozenset[str]:
+    """면제해 줄 자기 이름들. 실제로 쓸 수 있는 자리에 있을 때만.
+
+    출력 별칭은 ``ORDER BY`` 와 ``HAVING`` 에서만 참조할 수 있다. ``WHERE`` 는
+    투영보다 먼저 평가되므로 거기 쓴 별칭은 어차피 데이터베이스가 거부한다.
+    그런데 면제를 무조건 걸어 두면 ``SELECT amount AS foo ... WHERE foo = 1`` 이
+    미지 컬럼 검사를 통과해 버리고, 실패는 여기가 아니라 데이터베이스에서 난다.
+    """
+    aliases = _output_aliases(statement)
+    if not aliases:
+        return aliases
+
+    in_where: set[str] = set()
+    for select in statement.find_all(exp.Select):
+        where = select.args.get("where")
+        if where is None:
+            continue
+        in_where |= {c.name.lower() for c in where.find_all(exp.Column) if c.name}
+    return aliases - in_where
 
 
 def _rebind_model_references(
@@ -207,7 +493,11 @@ def _cte_name(model_name: str) -> str:
 
 
 def _build_model_select(
-    model: LogicalModel, graph: SchemaGraph, fields: tuple[LogicalField, ...]
+    model: LogicalModel,
+    graph: SchemaGraph,
+    fields: tuple[LogicalField, ...],
+    *,
+    pushed: dict[tuple[str, str], list[exp.Expression]] | None = None,
 ) -> tuple[exp.Select, int]:
     base = graph.schema.table(model.base_table)
     if base is None:
@@ -237,9 +527,17 @@ def _build_model_select(
 
         elif source.kind is FieldKind.AGGREGATED:
             step = source.path[0]
-            child_steps.setdefault(step.to_table, step)
-            child_fields.setdefault(step.to_table, []).append(field)
-            alias = _aggregate_alias(step.to_table)
+            # 자식 테이블 이름만으로 묶으면 안 된다. 자식이 부모를 두 개의 키로
+            # 참조하면 (``order_links.src_order_id`` 와 ``dst_order_id``) 두 집계가
+            # 하나의 서브쿼리로 뭉개져 같은 값이 두 번 나온다 — 에러 없이.
+            key = _child_key(step)
+            child_steps.setdefault(key, step)
+            if field.filter_only:
+                # 값이 아니라 조건을 받는 자리다. 투영하지 않는다 —
+                # 조건은 이미 서브쿼리 안으로 옮겨졌다.
+                continue
+            child_fields.setdefault(key, []).append(field)
+            alias = _aggregate_alias(key)
             projections.append(_aliased(_column(alias, field.name), field.name))
 
     if not projections:
@@ -252,31 +550,63 @@ def _build_model_select(
         ]
 
     select = exp.select(*projections).from_(
-        exp.alias_(exp.to_table(base.name), _BASE_ALIAS, table=True)
+        exp.alias_(_physical(base.name, graph), _BASE_ALIAS, table=True)
     )
 
     for _, path in sorted(join_paths.items()):
         select = select.join(
-            _many_to_one_join(path),
+            _many_to_one_join(path, graph),
             on=_join_condition(path),
             join_type="LEFT",
         )
 
-    for child, step in sorted(child_steps.items()):
-        subquery = _aggregate_subquery(child, step, child_fields[child], graph)
-        alias = _aggregate_alias(child)
+    for key, step in sorted(child_steps.items()):
+        predicates = (pushed or {}).get(
+            (model.name.lower(), step.to_table.lower()), []
+        )
+        subquery = _aggregate_subquery(
+            step.to_table, step, child_fields.get(key, []), graph,
+            predicates=predicates,
+        )
+        alias = _aggregate_alias(key)
         select = select.join(
             exp.alias_(subquery.subquery(), alias, table=True),
             on=_aggregate_condition(step, alias),
-            join_type="LEFT",
+            # 조건이 걸린 자식은 INNER 로 붙인다.
+            #
+            # "7월 매출"을 물으면 7월에 매출이 없는 조직은 답에서 빠져야 한다.
+            # LEFT 로 두면 그런 부모가 NULL 을 달고 살아남는다 — NL2SQL 실측에서
+            # 13행이 나왔고 그중 5행이 NULL 이었다. 정답은 8행이다.
+            #
+            # 조건이 없으면 LEFT 를 유지한다. 자식이 없다는 사실 자체가 답의
+            # 일부인 질문("주문이 하나도 없는 고객")을 지우면 안 되기 때문이다.
+            join_type="INNER" if predicates else "LEFT",
         )
 
     return select, len(join_paths) + len(child_steps)
 
 
-def _many_to_one_join(path: tuple[JoinStep, ...]) -> exp.Expression:
+def _physical(table_name: str, graph: SchemaGraph) -> exp.Table:
+    """물리 테이블 참조. 스키마가 있으면 한정자를 붙인다.
+
+    붙이지 않으면 ``sales.orders`` 가 ``orders`` 로 나가고, 기본 스키마가 아닌
+    데이터베이스에서는 테이블을 못 찾거나 — 더 나쁘게 — 같은 이름의 다른
+    스키마 테이블을 읽는다.
+    """
+    found = graph.schema.table(table_name)
+    node = exp.Table(this=_ident(table_name))
+    if found is not None and found.schema:
+        node.set("db", _ident(found.schema))
+    return node
+
+
+def _many_to_one_join(
+    path: tuple[JoinStep, ...], graph: SchemaGraph
+) -> exp.Expression:
     step = path[-1]
-    return exp.alias_(exp.to_table(step.to_table), _path_alias(path), table=True)
+    return exp.alias_(
+        _physical(step.to_table, graph), _path_alias(path), table=True
+    )
 
 
 def _join_condition(path: tuple[JoinStep, ...]) -> exp.Expression:
@@ -302,14 +632,19 @@ def _join_condition(path: tuple[JoinStep, ...]) -> exp.Expression:
 
 
 def _aggregate_subquery(
-    child: str, step: JoinStep, fields: list[LogicalField], graph: SchemaGraph
+    child: str,
+    step: JoinStep,
+    fields: list[LogicalField],
+    graph: SchemaGraph,
+    *,
+    predicates: list[exp.Expression] | None = None,
 ) -> exp.Select:
     """Group a child table by its foreign key before it is ever joined.
 
     This is the grain guard. The subquery yields at most one row per parent key,
     so the join that follows cannot change the parent's row count.
     """
-    group_columns = [exp.column(c) for c in step.to_columns]
+    group_columns = [exp.Column(this=_ident(c)) for c in step.to_columns]
     projections: list[exp.Expression] = list(group_columns)
 
     for field in fields:
@@ -317,13 +652,13 @@ def _aggregate_subquery(
         if source.aggregate == "count":
             call: exp.Expression = exp.Count(this=exp.Star())
         elif source.aggregate == "sum":
-            call = exp.Sum(this=exp.column(source.column))
+            call = exp.Sum(this=exp.Column(this=_ident(source.column)))
         elif source.aggregate == "avg":
-            call = exp.Avg(this=exp.column(source.column))
+            call = exp.Avg(this=exp.Column(this=_ident(source.column)))
         elif source.aggregate == "max":
-            call = exp.Max(this=exp.column(source.column))
+            call = exp.Max(this=exp.Column(this=_ident(source.column)))
         elif source.aggregate == "min":
-            call = exp.Min(this=exp.column(source.column))
+            call = exp.Min(this=exp.Column(this=_ident(source.column)))
         else:
             raise ExpansionError(
                 f"unsupported aggregate '{source.aggregate}' on field '{field.name}'"
@@ -333,7 +668,12 @@ def _aggregate_subquery(
     if graph.schema.table(child) is None:
         raise ExpansionError(f"child table '{child}' is not in the schema")
 
-    return exp.select(*projections).from_(exp.to_table(child)).group_by(*group_columns)
+    select = exp.select(*projections).from_(_physical(child, graph))
+    if predicates:
+        # 밀어넣은 조건은 GROUP BY 앞에 걸린다. 집계가 조건에 걸린 행만 보게
+        # 되고, 그래야 "이번 달 매출"이 실제로 이번 달만 더한다.
+        select = select.where(_conjunction(list(predicates)))
+    return select.group_by(*group_columns)
 
 
 def _aggregate_condition(step: JoinStep, alias: str) -> exp.Expression:
@@ -357,7 +697,7 @@ def _available_join_count(model: LogicalModel) -> int:
             for depth in range(1, len(source.path) + 1):
                 paths.add(_path_key(source.path[:depth]))
         elif source.kind is FieldKind.AGGREGATED and source.path:
-            children.add(source.path[0].to_table)
+            children.add(_child_key(source.path[0]))
     return len(paths) + len(children)
 
 
@@ -365,7 +705,17 @@ def _available_join_count(model: LogicalModel) -> int:
 
 
 def _path_key(path: tuple[JoinStep, ...]) -> tuple[str, ...]:
-    return tuple(step.to_table.lower() for step in path)
+    return tuple(_step_key(step) for step in path)
+
+
+def _step_key(step: JoinStep) -> str:
+    """한 조인 단계의 신원. 대상 테이블만으로는 부족하다.
+
+    ``orders.buyer_id`` 와 ``orders.seller_id`` 는 둘 다 ``users`` 로 가지만 서로
+    다른 조인이다. 대상 이름만 쓰면 두 경로가 같은 별칭으로 뭉개져서 한쪽이
+    사라지거나 엉뚱한 행이 붙는다.
+    """
+    return f"{step.to_table.lower()}@{'_'.join(c.lower() for c in step.from_columns)}"
 
 
 def _path_alias(path: tuple[JoinStep, ...]) -> str:
@@ -375,19 +725,31 @@ def _path_alias(path: tuple[JoinStep, ...]) -> str:
     ``addresses`` and via ``stores`` are two different joins and must not
     collapse onto one alias.
     """
-    return "j_" + "__".join(step.to_table.lower() for step in path)
+    return "j_" + "__".join(
+        f"{step.to_table.lower()}_{'_'.join(c.lower() for c in step.from_columns)}"
+        for step in path
+    )
 
 
-def _aggregate_alias(child: str) -> str:
-    return f"agg_{child.lower()}"
+def _child_key(step: JoinStep) -> str:
+    """1:N 자식 관계 하나의 신원. 자식 테이블 이름 + 그 쪽 조인 컬럼.
+
+    같은 자식이 부모를 여러 키로 참조할 수 있으므로 테이블 이름만으로는
+    구분되지 않는다.
+    """
+    return f"{step.to_table.lower()}@{'_'.join(c.lower() for c in step.to_columns)}"
+
+
+def _aggregate_alias(child_key: str) -> str:
+    return "agg_" + child_key.replace("@", "_")
 
 
 def _column(table_alias: str, column: str) -> exp.Column:
-    return exp.column(column, table=table_alias)
+    return exp.Column(this=_ident(column), table=exp.to_identifier(table_alias))
 
 
 def _aliased(node: exp.Expression, alias: str) -> exp.Expression:
-    return exp.alias_(node, alias)
+    return exp.alias_(node, _ident(alias))
 
 
 def _conjunction(parts: list[exp.Expression]) -> exp.Expression:

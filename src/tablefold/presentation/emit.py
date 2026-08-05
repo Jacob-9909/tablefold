@@ -65,6 +65,7 @@ def _model_to_dict(model: LogicalModel) -> dict[str, Any]:
                     ],
                 },
                 "description": f.description,
+                "filter_only": f.filter_only,
             }
             for f in model.fields
         ],
@@ -74,27 +75,73 @@ def _model_to_dict(model: LogicalModel) -> dict[str, Any]:
 def render_text(layer: LogicalLayer) -> str:
     """Compact schema text, sized for a prompt.
 
-    Fields are grouped by kind because the grouping carries a rule the reader
-    needs: aggregated fields are already summarised over child rows, so
-    wrapping one in another ``SUM`` double-counts.
+    필드를 종류별로 묶는 이유는 분류가 예뻐서가 아니라, 묶음마다 읽는 쪽이 어겨서는
+    안 되는 규칙이 하나씩 달려 있기 때문이다. 그 규칙을 암시로만 두면 지켜지지 않는다.
+    그래서 각 묶음의 계약을 문장으로 적는다:
+
+    * 집계 필드는 자식 행에 대해 **이미 한 번** 합산된 값이다. 앵커 한 행에서 그
+      값은 개별 행이 아니라 총계다. 여러 앵커 행에 걸쳐 ``SUM`` 으로 다시 묶는 것은
+      정상이며 이중 계산이 아니다 — 자식 행 하나는 앵커 행 하나에만 속하기 때문이다.
+      (NL2SQL 실측: ``SUM(f_sales_SALES_AMT_sum)`` 이 ``SUM(F_SALES.SALES_AMT)`` 와
+      마지막 자리까지 일치했다.) 뜻이 달라지는 것은 ``AVG`` 쪽이다. 총계들의 평균은
+      개별 행의 평균이 아니다.
+    * 필터 전용 필드는 그 집계 안으로 밀어 넣을 조건을 받는 자리다. ``SELECT`` 에
+      쓰면 앵커 한 행에 대응하는 값이 없어 뜻이 성립하지 않는다.
+    * 모델은 하나만 읽는다. 두 모델을 ``JOIN`` 하는 순간 이 레이어가 없애려던 문제가
+      그대로 돌아온다.
     """
     header = (
         f"=== TIER-1 CORE WIDE MODELS ({len(layer.models)} models covering "
         f"{layer.covered_table_count}/{layer.source_table_count} physical tables) ==="
     )
-    lines: list[str] = [header, ""]
+    lines: list[str] = [
+        header,
+        "각 모델은 넓은 표 하나다. 한 번에 한 모델만 조회하고, "
+        "모델끼리 JOIN 하지 않는다.",
+        "",
+    ]
 
     for model in layer.models:
         lines.append(f"### {model.name}")
         if model.description:
             lines.append(model.description)
 
-        for kind, label in (
-            (FieldKind.BASE, "Own columns"),
-            (FieldKind.JOINED, "Joined in (one related row each)"),
-            (FieldKind.AGGREGATED, "Aggregated from child rows"),
-        ):
-            group = [f for f in model.fields if f.source.kind is kind]
+        groups = (
+            (
+                "Own columns",
+                [
+                    f
+                    for f in model.fields
+                    if f.source.kind is FieldKind.BASE and not f.filter_only
+                ],
+            ),
+            (
+                "Joined in (one related row each)",
+                [
+                    f
+                    for f in model.fields
+                    if f.source.kind is FieldKind.JOINED and not f.filter_only
+                ],
+            ),
+            (
+                "Aggregated from child rows — 자식 행에 대해 이미 합산된 "
+                "총계. "
+                "여러 행을 묶으려면 SUM 을 다시 써도 된다(이중 계산 아님). "
+                "AVG 는 총계들의 평균이 되어 뜻이 달라진다",
+                [
+                    f
+                    for f in model.fields
+                    if f.source.kind is FieldKind.AGGREGATED and not f.filter_only
+                ],
+            ),
+            (
+                "WHERE 전용 — 위 집계에 조건을 걸 때만 쓴다. "
+                "SELECT 나 GROUP BY 에 쓸 수 없다",
+                [f for f in model.fields if f.filter_only],
+            ),
+        )
+
+        for label, group in groups:
             if not group:
                 continue
             lines.append(f"{label}:")

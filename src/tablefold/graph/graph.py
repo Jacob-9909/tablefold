@@ -74,9 +74,18 @@ class SchemaGraph:
 
         최단 경로 순으로 ``(table, path)`` 쌍을 반환합니다. 모든 단계가 N:1 관계이므로
         이 경로들을 따라 조인하는 것은 source 테이블의 입도(Grain)를 완벽히 보존합니다.
+
+        방문 여부는 도달한 *테이블* 이 아니라 지나온 *엣지* 로 기록한다. 테이블로
+        기록하면 한 테이블이 같은 대상을 두 개의 키로 참조할 때 — ``orders`` 의
+        ``buyer_id`` 와 ``seller_id`` 가 모두 ``users`` 를 가리키는 흔한 모양 —
+        먼저 도달한 쪽이 대상을 소진해 버려서 두 번째 경로가 통째로 사라진다.
+        판매자 정보가 모델에서 조용히 빠지고, 조인은 무조건 구매자 쪽으로 걸린다.
+
+        경로 깊이는 ``max_hops`` 가 묶고, 같은 엣지를 두 번 밟지 않으므로 순환
+        외래 키에서도 끝난다.
         """
         results: list[tuple[str, tuple[JoinStep, ...]]] = []
-        seen = {source.lower()}
+        seen: set[tuple[str, tuple[str, ...], str]] = set()
         queue: deque[tuple[str, tuple[JoinStep, ...]]] = deque([(source, ())])
 
         while queue:
@@ -84,8 +93,14 @@ class SchemaGraph:
             if len(path) >= max_hops:
                 continue
             for fk in self.outgoing(current):
-                target = fk.to_table.lower()
-                if target in seen:
+                if fk.to_table.lower() == source.lower():
+                    continue  # 출발점으로 되돌아오는 경로는 아무것도 더하지 않는다
+                edge = (
+                    fk.from_table.lower(),
+                    tuple(c.lower() for c in fk.from_columns),
+                    fk.to_table.lower(),
+                )
+                if edge in seen:
                     continue
                 step = JoinStep(
                     from_table=fk.from_table,
@@ -95,7 +110,7 @@ class SchemaGraph:
                     cardinality=Cardinality.MANY_TO_ONE,
                 )
                 extended = (*path, step)
-                seen.add(target)
+                seen.add(edge)
                 results.append((fk.to_table, extended))
                 queue.append((fk.to_table, extended))
 

@@ -1,386 +1,455 @@
-/* tablefold demo.
-   화면은 세 단계로만 읽힌다: 무엇이 줄었나 → 어떻게 묶였나 → 실제로 돌려보기.
-   전문 용어는 화면에 쓰지 않고, 필요한 곳에서는 한 줄로 풀어 쓴다. */
+/**
+ * tablefold — Schema Engineering Dashboard Logic (Full Feature Set)
+ */
 
-const $ = (id) => document.getElementById(id);
-
-const KIND = {
-  base: {
-    label: "원래 있던 컬럼",
-    why: "이 모델의 중심 테이블이 원래 가지고 있던 값입니다.",
-    cls: "seg-base",
-    color: "#4b6fa8",
-  },
-  joined: {
-    label: "붙여온 값",
-    why: "다른 테이블에서 가져왔습니다. 한 줄에 하나씩만 대응되므로 줄 수가 늘지 않습니다.",
-    cls: "seg-joined",
-    color: "#7d9bc4",
-  },
-  aggregated: {
-    label: "합계 · 개수",
-    why: "여러 줄짜리 하위 테이블을 미리 더하거나 세어 둔 값입니다. 그냥 이어 붙이면 금액이 부풀기 때문에 미리 접어 둡니다.",
-    cls: "seg-agg",
-    color: "#b9c9de",
-  },
-};
-
-const num = (n) => Number(n).toLocaleString("ko-KR");
-
-let foldData = null;
-
-document.addEventListener("DOMContentLoaded", () => {
-  bindEvents();
-  loadSample();
-});
-
-function bindEvents() {
-  $("loadSample").addEventListener("click", loadSample);
-  $("runFold").addEventListener("click", runFold);
-  $("runExpand").addEventListener("click", runExpand);
-  $("copySql").addEventListener("click", copySql);
-
-  document.querySelectorAll(".presets .chip-btn").forEach((b) => {
-    b.addEventListener("click", () => {
-      $("logicalSql").value = b.dataset.sql;
-    });
-  });
-
-  $("sheetClose").addEventListener("click", closeSheet);
-  $("sheet").addEventListener("click", (e) => {
-    if (e.target === $("sheet")) closeSheet();
-  });
-  window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeSheet();
-  });
-}
-
-// ── 데이터 ──────────────────────────────────────────
-
-function readSettings() {
-  const areas = $("maxAreas").value;
-  return {
-    coverage: parseFloat($("coverage").value),
-    min_gain: parseInt($("minGain").value, 10),
-    max_cost: parseFloat($("maxCost").value),
-    field_budget: parseInt($("fieldBudget").value, 10),
-    max_areas: areas ? parseInt(areas, 10) : null,
+document.addEventListener('DOMContentLoaded', () => {
+  let state = {
+    ddl: '',
+    source: 'ddl',
+    anchorMode: 'auto',
+    coverage: 0.90,
+    minGain: 2,
+    maxCost: 10.0,
+    fieldBudget: 200,
+    maxAreas: 6,
+    activeTab: 'tab-1',
+    foldResult: null
   };
-}
 
-async function loadSample() {
-  const btn = $("loadSample");
-  btn.disabled = true;
-  try {
-    const res = await fetch("/api/sample");
-    if (!res.ok) throw new Error("예제를 불러오지 못했습니다.");
-    $("ddlInput").value = (await res.json()).ddl;
-    await runFold();
-  } catch (err) {
-    toast(err.message);
-  } finally {
-    btn.disabled = false;
+  // DOM Elements
+  const elSourceSelect = document.getElementById('sourceSelect');
+  const elAnchorSelect = document.getElementById('anchorSelect');
+  const elOpenDdlBtn = document.getElementById('openDdlBtn');
+  const elOpenConfigBtn = document.getElementById('openConfigBtn');
+  const elRunFoldBtn = document.getElementById('runFoldBtn');
+
+  // Modals & Sheets
+  const elDdlModal = document.getElementById('ddlModal');
+  const elConfigModal = document.getElementById('configModal');
+  const elSheet = document.getElementById('sheet');
+  const elSheetName = document.getElementById('sheetName');
+  const elSheetDesc = document.getElementById('sheetDesc');
+  const elSheetBody = document.getElementById('sheetBody');
+  const elSheetClose = document.getElementById('sheetClose');
+
+  const elDdlTextarea = document.getElementById('ddlTextarea');
+  const elApplyDdlBtn = document.getElementById('applyDdlBtn');
+  const elResetSampleDdlBtn = document.getElementById('resetSampleDdlBtn');
+  const elApplyConfigBtn = document.getElementById('applyConfigBtn');
+
+  // Headline & Metrics
+  const elBeforeJoins = document.getElementById('beforeJoins');
+  const elSizeDelta = document.getElementById('sizeDelta');
+  const elFactModels = document.getElementById('factModels');
+  const elFactCovered = document.getElementById('factCovered');
+  const elFactLinks = document.getElementById('factLinks');
+  const elFactEdge = document.getElementById('factEdge');
+  const elMDeclaredFks = document.getElementById('mDeclaredFks');
+  const elMPromptSize = document.getElementById('mPromptSize');
+  const elMSizeReduction = document.getElementById('mSizeReduction');
+
+  // Tabs Nav
+  const elPipelineNav = document.getElementById('pipelineNav');
+  const tabPanes = document.querySelectorAll('.tab-pane');
+
+  // Tab Elements
+  const elTblInferredFks = document.getElementById('tblInferredFks');
+  const elTblPhysicalCatalog = document.getElementById('tblPhysicalCatalog');
+  const elInferredFkCount = document.getElementById('inferredFkCount');
+
+  const elTblFactness = document.getElementById('tblFactness');
+  const elTblLattice = document.getElementById('tblLattice');
+
+  const elModelList = document.getElementById('modelList');
+  const elLeftoverBox = document.getElementById('leftoverBox');
+  const elLeftoverCount = document.getElementById('leftoverCount');
+  const elLeftoverChips = document.getElementById('leftoverChips');
+  const elModelCount = document.getElementById('modelCount');
+
+  const elPromptCodeView = document.getElementById('promptCodeView');
+  const elCopyPromptBtn = document.getElementById('copyPromptBtn');
+
+  const elLogicalSqlInput = document.getElementById('logicalSqlInput');
+  const elBtnExpandSql = document.getElementById('btnExpandSql');
+  const elPhysicalSqlOutput = document.getElementById('physicalSqlOutput');
+  const elExpandStatsBadge = document.getElementById('expandStatsBadge');
+  const elCopySqlBtn = document.getElementById('copySqlBtn');
+
+  // Toast
+  const elToast = document.getElementById('toastNotification');
+
+  function showToast(msg) {
+    elToast.textContent = msg;
+    elToast.hidden = false;
+    setTimeout(() => { elToast.hidden = true; }, 4500);
   }
-}
 
-async function runFold() {
-  const ddl = $("ddlInput").value;
-  if (!ddl.trim()) {
-    toast("데이터베이스 정의(DDL)를 먼저 넣어 주세요.");
-    return;
+  // Source & Anchor Selectors
+  elSourceSelect.addEventListener('change', (e) => {
+    state.source = e.target.value;
+    runFold();
+  });
+
+  elAnchorSelect.addEventListener('change', (e) => {
+    state.anchorMode = e.target.value;
+    runFold();
+  });
+
+  async function checkSources() {
+    try {
+      const res = await fetch('/api/sources');
+      if (res.ok) {
+        const data = await res.json();
+        const liveOpt = elSourceSelect.querySelector('option[value="live"]');
+        if (data.live_available) {
+          liveOpt.textContent = `Live Database (${data.live_label || 'Connected'})`;
+        } else {
+          liveOpt.textContent = `Live Database Connection`;
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    }
   }
 
-  const btn = $("runFold");
-  btn.disabled = true;
-  btn.textContent = "묶는 중…";
+  // Modals Event Handling
+  elOpenDdlBtn.addEventListener('click', () => {
+    elDdlTextarea.value = state.ddl;
+    elDdlModal.hidden = false;
+  });
 
-  try {
-    const res = await fetch("/api/fold", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ddl, ...readSettings() }),
+  elOpenConfigBtn.addEventListener('click', () => {
+    document.getElementById('cfgMaxAreas').value = state.maxAreas;
+    document.getElementById('cfgFieldBudget').value = state.fieldBudget;
+    document.getElementById('cfgMinGain').value = state.minGain;
+    document.getElementById('cfgMaxCost').value = state.maxCost;
+    document.getElementById('cfgCoverage').value = state.coverage;
+    elConfigModal.hidden = false;
+  });
+
+  document.querySelectorAll('.close-modal-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const modalId = e.target.getAttribute('data-modal');
+      if (modalId) document.getElementById(modalId).hidden = true;
     });
-    if (!res.ok) throw new Error((await res.json()).detail || "묶기에 실패했습니다.");
+  });
 
-    foldData = await res.json();
-    render(foldData);
-  } catch (err) {
-    toast(err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "다시 묶기";
-  }
-}
-
-async function runExpand() {
-  const ddl = $("ddlInput").value;
-  const sql = $("logicalSql").value;
-  if (!ddl.trim() || !sql.trim()) {
-    toast("SQL을 입력해 주세요.");
-    return;
-  }
-
-  const btn = $("runExpand");
-  btn.disabled = true;
-  btn.textContent = "바꾸는 중…";
-
-  try {
-    const res = await fetch("/api/expand", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ddl, sql, ...readSettings() }),
+  [elDdlModal, elConfigModal].forEach(modal => {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.hidden = true;
     });
-    if (!res.ok) throw new Error((await res.json()).detail || "변환에 실패했습니다.");
+  });
 
-    const data = await res.json();
-    $("expandedSql").textContent = data.expanded_sql;
+  elSheetClose.addEventListener('click', () => {
+    elSheet.hidden = true;
+  });
 
-    const stat = $("expandStat");
-    stat.hidden = false;
-    stat.textContent =
-      `이 질문에 실제로 필요한 연결은 ${data.joins_emitted}개입니다. ` +
-      `모델이 가진 나머지 ${data.joins_pruned}개는 쓰지 않았습니다.`;
-  } catch (err) {
-    toast(err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "바꿔보기";
+  elApplyDdlBtn.addEventListener('click', () => {
+    state.ddl = elDdlTextarea.value;
+    elDdlModal.hidden = true;
+    runFold();
+  });
+
+  elResetSampleDdlBtn.addEventListener('click', async () => {
+    await fetchSampleDdl();
+    elDdlTextarea.value = state.ddl;
+  });
+
+  elApplyConfigBtn.addEventListener('click', () => {
+    state.maxAreas = parseInt(document.getElementById('cfgMaxAreas').value, 10);
+    state.fieldBudget = parseInt(document.getElementById('cfgFieldBudget').value, 10);
+    state.minGain = parseInt(document.getElementById('cfgMinGain').value, 10);
+    state.maxCost = parseFloat(document.getElementById('cfgMaxCost').value);
+    state.coverage = parseFloat(document.getElementById('cfgCoverage').value);
+    elConfigModal.hidden = true;
+    runFold();
+  });
+
+  // Tab Navigation Handling
+  elPipelineNav.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab-btn');
+    if (!btn) return;
+
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    const targetTab = btn.getAttribute('data-tab');
+    state.activeTab = targetTab;
+
+    tabPanes.forEach(pane => {
+      if (pane.id === targetTab) pane.classList.add('active');
+      else pane.classList.remove('active');
+    });
+
+    if (targetTab === 'tab-3' && state.foldResult) {
+      if (typeof window.renderLineage === 'function') {
+        window.renderLineage(state.foldResult.lineage);
+      }
+      if (typeof window.renderFidelity === 'function') {
+        window.renderFidelity(state.foldResult.fidelity);
+      }
+    }
+  });
+
+  // SQL Presets
+  document.querySelectorAll('.chip-btn[data-sql]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      elLogicalSqlInput.value = chip.getAttribute('data-sql');
+      runExpand();
+    });
+  });
+
+  elCopyPromptBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(elPromptCodeView.textContent);
+    showToast('Prompt copied to clipboard!');
+  });
+
+  elCopySqlBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(elPhysicalSqlOutput.textContent);
+    showToast('SQL copied to clipboard!');
+  });
+
+  elRunFoldBtn.addEventListener('click', () => runFold());
+  elBtnExpandSql.addEventListener('click', () => runExpand());
+
+  // API Calls
+  async function fetchSampleDdl() {
+    try {
+      const res = await fetch('/api/sample');
+      if (!res.ok) throw new Error('Failed to fetch sample DDL');
+      const data = await res.json();
+      state.ddl = data.ddl;
+    } catch (err) {
+      console.error(err);
+      showToast('Error loading sample DDL');
+    }
   }
-}
 
-async function copySql() {
-  const text = $("expandedSql").textContent;
-  if (!text || text.startsWith("바꿔보기")) return;
-  try {
-    await navigator.clipboard.writeText(text);
-    toast("복사했습니다.");
-  } catch {
-    toast("복사하지 못했습니다.");
-  }
-}
+  async function runFold() {
+    if (state.source === 'ddl' && !state.ddl.trim()) await fetchSampleDdl();
 
-// ── 그리기 ──────────────────────────────────────────
+    try {
+      const res = await fetch('/api/fold', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ddl: state.ddl,
+          source: state.source,
+          anchor_mode: state.anchorMode,
+          coverage: state.coverage,
+          min_gain: state.minGain,
+          max_cost: state.maxCost,
+          field_budget: state.fieldBudget,
+          max_areas: state.maxAreas
+        })
+      });
 
-function render(data) {
-  renderHeadline(data);
-  renderModels(data);
-  renderLeftover(data);
-  renderAdvanced(data);
-}
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || 'Fold failed');
+      }
 
-function renderHeadline(data) {
-  const s = data.size;
-  const t = data.tier_summary;
-
-  $("headlineEmpty").hidden = true;
-  $("headlineBody").hidden = false;
-  $("factsRow").hidden = false;
-
-  const saved = Math.max(0, Math.round((1 - s.core_prompt_chars / s.ddl_chars) * 100));
-
-  $("beforeChars").textContent = num(s.ddl_chars);
-  $("beforeNote").textContent = `테이블 ${t.total_physical_tables_count}개를 그대로`;
-  $("afterChars").textContent = num(s.core_prompt_chars);
-  $("afterNote").textContent = `모델 ${t.tier1_core_models_count}개로`;
-  $("savedPct").textContent = `${saved}%`;
-
-  $("headlinePlain").innerHTML =
-    `AI에게 데이터베이스를 설명하려면 원래 <b>${num(s.ddl_chars)}자</b>를 통째로 넣어야 했습니다. ` +
-    `묶은 뒤에는 <b>${num(s.core_prompt_chars)}자</b>면 됩니다. ` +
-    `설명이 짧아지면 AI가 덜 헷갈리고, 비용도 그만큼 줄어듭니다.`;
-
-  const pct = Math.round(
-    (t.tier1_covered_physical_tables_count / t.total_physical_tables_count) * 100
-  );
-
-  $("factModels").textContent = `${t.tier1_core_models_count}개`;
-  $("factCovered").textContent = `${t.tier1_covered_physical_tables_count}개`;
-  $("factCoveredHelp").textContent = `전체 ${t.total_physical_tables_count}개 중 ${pct}%`;
-  $("factEdge").textContent = `${t.tier2_edge_tables_count}개`;
-  $("factLinks").textContent = `${data.physical.inferred_fk_count}개`;
-}
-
-function renderModels(data) {
-  const models = data.logical.models;
-  const list = $("modelList");
-
-  if (!models.length) {
-    list.innerHTML = `<div class="empty">묶인 모델이 없습니다.</div>`;
-    return;
+      const data = await res.json();
+      state.foldResult = data;
+      renderAllTabs(data);
+      showToast(`Fold pipeline executed successfully (${state.source.toUpperCase()}).`);
+    } catch (err) {
+      console.error(err);
+      showToast(err.message);
+    }
   }
 
-  list.innerHTML = "";
+  async function runExpand() {
+    const sql = elLogicalSqlInput.value.trim();
+    if (!sql) return;
 
-  models.forEach((m, i) => {
-    const counts = countKinds(m.fields);
-    const total = m.fields.length || 1;
-    const tables = m.absorbed_tables.length + 1;
+    try {
+      const res = await fetch('/api/expand', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ddl: state.ddl,
+          sql: sql,
+          source: state.source,
+          anchor_mode: state.anchorMode,
+          coverage: state.coverage,
+          min_gain: state.minGain,
+          max_cost: state.maxCost,
+          field_budget: state.fieldBudget,
+          max_areas: state.maxAreas
+        })
+      });
 
-    const btn = document.createElement("button");
-    btn.className = "model";
-    btn.type = "button";
-    btn.innerHTML = `
-      <div>
-        <div class="model-name">${esc(m.name)}</div>
-        <div class="model-line">
-          ${esc(m.base_table)} 1건이 한 줄. 테이블 ${tables}개의 내용이 이 줄에 들어 있습니다.
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || 'Expand failed');
+      }
+
+      const data = await res.json();
+      elPhysicalSqlOutput.textContent = data.expanded_sql;
+
+      elExpandStatsBadge.hidden = false;
+      elExpandStatsBadge.innerHTML = `
+        <strong>Expansion Stats:</strong> ${data.joins_emitted} Joins Emitted | 
+        ${data.joins_pruned.length} Joins Pruned (${data.joins_pruned.join(', ') || 'None'}) | 
+        ${data.fields_used.length} Fields Referenced
+      `;
+    } catch (err) {
+      console.error(err);
+      elPhysicalSqlOutput.textContent = `Error: ${err.message}`;
+      elExpandStatsBadge.hidden = true;
+    }
+  }
+
+  // Open Drawer Sheet for Model Details
+  function openModelSheet(model) {
+    elSheetName.textContent = `Wide Model: ${model.name}`;
+    elSheetDesc.textContent = `Base Anchor: ${model.base_table} | Total Fields: ${model.field_count}`;
+
+    const fieldsHtml = model.fields.map(f => `
+      <div class="sheet-field-row">
+        <span class="sheet-field-name"><strong>${f.name}</strong></span>
+        <span class="sheet-field-type"><code>${f.type}</code></span>
+        <span class="sheet-field-origin">${f.source_table}.${f.source_column} (${f.cardinality})</span>
+      </div>
+    `).join('');
+
+    elSheetBody.innerHTML = `
+      <div class="sheet-section">
+        <h4>Absorbed Tables (${model.absorbed_tables.length})</h4>
+        <p>${model.absorbed_tables.join(', ') || 'None (Single table model)'}</p>
+      </div>
+      <div class="sheet-section" style="margin-top:16px;">
+        <h4>Model Fields Catalog (${model.fields.length})</h4>
+        <div class="table-scroll" style="max-height:300px;">
+          ${fieldsHtml}
         </div>
       </div>
-      <div class="model-right">
-        <div class="model-count">${tables}</div>
-        <div class="model-count-label">테이블</div>
-      </div>
-      <div class="model-bar">
-        ${["base", "joined", "aggregated"]
-          .map((k) =>
-            counts[k]
-              ? `<i class="${KIND[k].cls}" style="width:${(counts[k] / total) * 100}%"></i>`
-              : ""
-          )
-          .join("")}
-      </div>
-      <div class="model-legend">
-        ${["base", "joined", "aggregated"]
-          .map((k) =>
-            counts[k]
-              ? `<span><i class="dot" style="background:${KIND[k].color}"></i>${KIND[k].label} ${counts[k]}</span>`
-              : ""
-          )
-          .join("")}
-        <span style="color:var(--ink-3)">눌러서 자세히 보기</span>
-      </div>
     `;
-    btn.addEventListener("click", () => openSheet(models[i]));
-    list.appendChild(btn);
-  });
-}
 
-function renderLeftover(data) {
-  const edge = data.tier2_edge_tables || [];
-  const box = $("leftoverBox");
-  if (!edge.length) {
-    box.hidden = true;
-    return;
+    elSheet.hidden = false;
   }
-  box.hidden = false;
-  $("leftoverCount").textContent = `${edge.length}개`;
-  $("leftoverChips").innerHTML = edge
-    .map((t) => `<span class="chip">${esc(t.name)}</span>`)
-    .join("");
-}
 
-function renderAdvanced(data) {
-  $("promptText").textContent = data.prompt_text;
+  // Render Functions
+  function renderAllTabs(data) {
+    // 1. Headline & Summary Metrics
+    const declaredFkCount = data.physical.declared_fk_count || 0;
+    const inferredFkCount = data.physical.inferred_fk_count || 0;
+    elBeforeJoins.textContent = declaredFkCount + inferredFkCount;
 
-  const fks = data.physical.inferred_fks || [];
-  $("fkBody").innerHTML = fks.length
-    ? fks
-        .map(
-          (fk) => `
+    const ddlChars = data.size.ddl_chars || 1;
+    const promptChars = data.size.core_prompt_chars || 1;
+    const ratio = Math.round((1 - (promptChars / ddlChars)) * 100);
+    elSizeDelta.textContent = `${ratio > 0 ? ratio : 0}% Reduction`;
+
+    elFactModels.textContent = data.tier_summary.tier1_core_models_count;
+    elFactCovered.textContent = `${data.tier_summary.tier1_covered_physical_tables_count} / ${data.physical.table_count} tables covered`;
+
+    elFactLinks.textContent = inferredFkCount;
+    elMDeclaredFks.textContent = `${declaredFkCount} declared in DDL`;
+
+    elFactEdge.textContent = data.tier_summary.tier2_edge_tables_count;
+    elMPromptSize.textContent = `${promptChars.toLocaleString()} chars`;
+    elMSizeReduction.textContent = `${ratio > 0 ? ratio : 0}% reduction vs physical DDL`;
+
+    // STEP 1: Introspection & Recovery
+    elInferredFkCount.textContent = inferredFkCount;
+    if (data.physical.inferred_fks.length === 0) {
+      elTblInferredFks.innerHTML = `<tr><td colspan="5" class="empty-cell">No inferred foreign keys (All declared in DDL).</td></tr>`;
+    } else {
+      elTblInferredFks.innerHTML = data.physical.inferred_fks.map(fk => `
         <tr>
-          <td class="mono">${esc(fk.from_table)}</td>
-          <td class="mono">${esc(fk.from_columns.join(", "))}</td>
-          <td class="mono">${esc(fk.to_table)}.${esc(fk.to_columns.join(", "))}</td>
-          <td class="num">${Math.round(fk.confidence * 100)}%</td>
-        </tr>`
-        )
-        .join("")
-    : `<tr><td colspan="4" class="empty">DDL에 모든 연결이 이미 적혀 있어 되찾을 것이 없었습니다.</td></tr>`;
+          <td><strong>${fk.from_table}</strong></td>
+          <td><code>${fk.from_columns.join(', ')}</code></td>
+          <td><strong>${fk.to_table}</strong></td>
+          <td><code>${fk.to_columns.join(', ')}</code></td>
+          <td><span class="badge-tag fact">${Math.round(fk.confidence * 100)}%</span></td>
+        </tr>
+      `).join('');
+    }
 
-  $("tableBody").innerHTML = data.physical.tables
-    .map((t) => {
-      const inModel = t.tier.includes("Core");
-      return `
-        <tr>
-          <td class="mono">${esc(t.name)}</td>
-          <td><span class="pill ${inModel ? "pill-in" : "pill-out"}">${
-            inModel ? "모델에 포함" : "따로 남음"
-          }</span></td>
-          <td class="num">${t.fact_score.toFixed(2)}</td>
-          <td class="num">${t.column_count}</td>
-          <td class="num">${t.in_degree}</td>
-          <td class="num">${t.out_degree}</td>
-        </tr>`;
-    })
-    .join("");
-}
+    elTblPhysicalCatalog.innerHTML = data.physical.tables.map(t => `
+      <tr>
+        <td><strong>${t.name}</strong></td>
+        <td><code>${t.primary_key.join(', ') || '-'}</code></td>
+        <td>${t.column_count}</td>
+        <td><span class="badge-tag ${t.role}">${t.role.toUpperCase()}</span></td>
+        <td>${t.row_estimate ? t.row_estimate.toLocaleString() : '-'}</td>
+        <td><span class="badge-tag ${t.tier.includes('Core') ? 'fact' : 'dim'}">${t.tier}</span></td>
+      </tr>
+    `).join('');
 
-// ── 상세 시트 ───────────────────────────────────────
+    // STEP 2: Factness & Lattice
+    elTblFactness.innerHTML = data.physical.tables.map(t => `
+      <tr>
+        <td><strong>${t.name}</strong></td>
+        <td><span class="badge-tag ${t.role}">${t.role.toUpperCase()}</span></td>
+        <td><strong>${t.fact_score}</strong></td>
+        <td>${t.columns.filter(c => c.is_numeric).length} cols</td>
+        <td>${t.columns.some(c => c.is_temporal) ? 'Yes' : 'No'}</td>
+        <td>${t.tier.includes('Core') ? '✓ Anchor/Absorbed' : '-'}</td>
+      </tr>
+    `).join('');
 
-function openSheet(model) {
-  $("sheetName").textContent = model.name;
-  $("sheetDesc").textContent =
-    `${model.base_table} 1건이 한 줄입니다. ` +
-    `테이블 ${model.absorbed_tables.length + 1}개의 내용이 항목 ${model.fields.length}개로 들어 있습니다.`;
+    elTblLattice.innerHTML = data.analytics.candidates.map(c => `
+      <tr>
+        <td><strong>${c.name}</strong></td>
+        <td><span class="badge-tag ${c.role}">${c.role.toUpperCase()}</span></td>
+        <td>${c.score}</td>
+        <td>${c.reach_count} tables (${c.reach_tables.join(', ')})</td>
+        <td>${c.estimated_fields} fields</td>
+      </tr>
+    `).join('');
 
-  const groups = ["base", "joined", "aggregated"]
-    .map((kind) => {
-      const fields = model.fields.filter((f) => f.kind === kind);
-      if (!fields.length) return "";
-      return `
-        <div class="field-group">
-          <div class="field-group-head">
-            <h4>${KIND[kind].label}</h4>
-            <span class="field-group-count">${fields.length}개</span>
-          </div>
-          <p class="field-group-why">${KIND[kind].why}</p>
-          ${fields
-            .map(
-              (f) => `
-            <div class="field-row">
-              <span class="field-nm">${esc(f.name)}</span>
-              <span class="field-src">${esc(sourceOf(f))}</span>
-            </div>`
-            )
-            .join("")}
-        </div>`;
-    })
-    .join("");
+    // STEP 3: Wide Models Grid & Leftover Edge Tables
+    const models = data.logical.models || [];
+    elModelCount.textContent = models.length;
 
-  $("sheetBody").innerHTML = `
-    <div class="field-group">
-      <div class="field-group-head"><h4>합쳐진 테이블</h4>
-        <span class="field-group-count">${model.absorbed_tables.length + 1}개</span></div>
-      <div class="chips">
-        <span class="chip">${esc(model.base_table)} (중심)</span>
-        ${model.absorbed_tables.map((t) => `<span class="chip">${esc(t)}</span>`).join("")}
+    elModelList.innerHTML = models.map((m, idx) => `
+      <div class="model-card-item" data-idx="${idx}">
+        <div class="model-card-head">
+          <span class="model-card-title">${m.name}</span>
+          <span class="badge-tag fact">${m.field_count} fields</span>
+        </div>
+        <div class="model-card-sub">Base Anchor: <strong>${m.base_table}</strong></div>
+        <div class="model-card-body">
+          <p><strong>Absorbed (${m.absorbed_tables.length}):</strong> ${m.absorbed_tables.join(', ') || 'None'}</p>
+        </div>
       </div>
-    </div>
-    ${groups}`;
+    `).join('');
 
-  $("sheet").hidden = false;
-}
+    document.querySelectorAll('.model-card-item').forEach(card => {
+      card.addEventListener('click', () => {
+        const idx = parseInt(card.getAttribute('data-idx'), 10);
+        openModelSheet(models[idx]);
+      });
+    });
 
-function closeSheet() {
-  $("sheet").hidden = true;
-}
+    const tier2Tables = data.tier2_edge_tables || [];
+    elLeftoverCount.textContent = tier2Tables.length;
+    if (tier2Tables.length > 0) {
+      elLeftoverBox.style.display = 'block';
+      elLeftoverChips.innerHTML = tier2Tables.map(t => `<span class="chip-item">${t.name}</span>`).join('');
+    } else {
+      elLeftoverBox.style.display = 'none';
+    }
 
-function sourceOf(f) {
-  const base = `${f.source.table}.${f.source.column}`;
-  return f.source.aggregate ? `${f.source.aggregate}(${base})` : base;
-}
+    // Lineage Diagram & Fidelity Report
+    if (typeof window.renderLineage === 'function') {
+      window.renderLineage(data.lineage);
+    }
+    if (typeof window.renderFidelity === 'function') {
+      window.renderFidelity(data.fidelity);
+    }
 
-// ── 자잘한 것 ───────────────────────────────────────
+    // STEP 4: Prompt Code View
+    elPromptCodeView.textContent = data.core_prompt_text || data.prompt_text;
 
-function countKinds(fields) {
-  return fields.reduce(
-    (acc, f) => ({ ...acc, [f.kind]: (acc[f.kind] || 0) + 1 }),
-    { base: 0, joined: 0, aggregated: 0 }
-  );
-}
+    // Trigger initial expand
+    runExpand();
+  }
 
-function esc(s) {
-  return String(s).replace(
-    /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
-  );
-}
-
-let toastTimer;
-function toast(msg) {
-  const el = $("toast");
-  el.textContent = msg;
-  el.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), 2600);
-}
+  // Initialize
+  checkSources();
+  runFold();
+});

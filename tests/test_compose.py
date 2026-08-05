@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from tablefold.classify import profile_tables
 from tablefold.cluster import SelectionPolicy, cluster
 from tablefold.compose import ComposeOptions, compose

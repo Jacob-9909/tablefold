@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,12 +11,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from demo import live
 from tablefold import emit
-from tablefold.clustering.cluster import build_lattice, SelectionPolicy
+from tablefold.clustering.cluster import SelectionPolicy, build_lattice
+from tablefold.clustering.select import ExplicitSelector
 from tablefold.expansion.expand import ExpansionError, expand
 from tablefold.graph.graph import SchemaGraph, infer_foreign_keys
 from tablefold.introspect.ddl import DDLIntrospector
 from tablefold.pipeline.pipeline import fold
+from tablefold.presentation import fidelity as fid
+from tablefold.presentation import lineage as lin
 from tablefold.presentation.cost import DEFAULT_FIELD_BUDGET, MAX_MODEL_FIELDS
 from tablefold.scoring.classify import profile_tables
 
@@ -34,7 +39,15 @@ app.add_middleware(
 
 
 class FoldRequest(BaseModel):
-    ddl: str
+    ddl: str = ""
+    source: str = "ddl"
+    """``ddl`` 이면 위의 텍스트를, ``live`` 면 접속된 데이터베이스를 읽는다."""
+
+    anchor_mode: str = "auto"
+    """``auto`` 는 탐욕적 집합 커버. 스타 스키마에서는 ``fact`` / ``dim`` 으로
+    앵커를 직접 지정한다 — 팩트가 앵커면 차원이 인라인되고, 차원이 앵커면
+    팩트들이 사전집계되어 팩트 간 조인이 사라진다."""
+
     coverage: float = 0.90
     min_gain: int = 2
     max_cost: float = 10.0
@@ -45,8 +58,10 @@ class FoldRequest(BaseModel):
 
 
 class ExpandRequest(BaseModel):
-    ddl: str
+    ddl: str = ""
     sql: str
+    source: str = "ddl"
+    anchor_mode: str = "auto"
     coverage: float = 0.90
     min_gain: int = 2
     max_cost: float = 10.0
@@ -62,36 +77,104 @@ def get_sample_ddl() -> dict[str, str]:
     return {"ddl": sample_file.read_text(encoding="utf-8")}
 
 
-@app.post("/api/fold")
-def run_fold(req: FoldRequest) -> dict[str, Any]:
+@app.get("/api/sources")
+def list_sources() -> dict[str, Any]:
+    """어떤 스키마 소스를 쓸 수 있는지."""
+    return {
+        "live_available": live.available(),
+        "live_label": os.environ.get("TABLEFOLD_MSSQL_DB", "ENTERPRISE_DWH_SIMULATED"),
+    }
+
+
+def _load_source(req: FoldRequest | ExpandRequest):
+    """요청이 가리키는 스키마와, 그 스키마에 맞는 폴드 옵션을 함께 돌려준다.
+
+    옵션이 소스마다 다른 이유는 스키마의 성격이 다르기 때문이다. 웨어하우스
+    스타 스키마는 앵커가 자명하고(팩트가 곧 앵커), 테이블 이름이 사람이 읽을
+    말이 아니라서 인라인 필드에 접두사를 붙이면 실제 질의와 어긋난다.
+    """
+    if req.source == "live":
+        try:
+            schema, meta = live.load()
+        except live.LiveUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        facts = tuple(meta["facts"])
+        dims = tuple(meta["dimensions"])
+
+        # 앵커를 무엇으로 잡느냐가 곧 무엇을 물을 수 있느냐다. 실측(NL2SQL 19테이블):
+        #
+        #   팩트 앵커  5,823자   답변가능 27.0%   — 팩트 간 질문을 못 푼다
+        #   차원 앵커 16,172자   답변가능 94.4%   — 팩트를 사전집계해 나란히 놓는다
+        #   혼합      21,846자   답변가능  100%   — 둘 다 두고 질문에 맞는 쪽을 쓴다
+        #
+        # 팩트 앵커의 27%는 추상적인 결함이 아니다. 골드셋 48문항 중 12문항이
+        # "매출과 계획이 서로 다른 모델에 있어 답할 수 없다"로 거부됐고, 그 12건이
+        # 정확히 이 분모와 분자의 차이다.
+        if req.anchor_mode == "mixed" and facts and dims:
+            anchors, aggregates, filters = facts + dims, True, True
+        elif req.anchor_mode == "dim" and dims:
+            anchors, aggregates, filters = dims, True, True
+        elif facts:
+            anchors, aggregates, filters = facts, False, False
+        else:
+            anchors, aggregates, filters = (), True, False
+
+        options = {
+            "selector": ExplicitSelector(anchors) if anchors else None,
+            "infer_missing_keys": False,
+            "include_aggregates": aggregates,
+            "expose_child_filters": filters,
+            "prefix_joined_fields": False,
+            "max_hops": 1,
+        }
+        if anchors:
+            # 앵커를 이름으로 지목했으면 개수 상한은 그 개수다. 화면의 기본값 6이
+            # 19개를 지목한 요청을 조용히 6개로 자르면, 답변가능률이 100%에서
+            # 13.5%로 떨어지는데 화면에는 아무 설명도 남지 않는다.
+            options["max_areas"] = len(anchors)
+            options["field_budget"] = 10_000
+        return schema, options, meta
+
     if not req.ddl.strip():
         raise HTTPException(status_code=400, detail="DDL SQL content cannot be empty.")
-
-    try:
-        introspector = DDLIntrospector(req.ddl)
-        raw_schema = introspector.introspect()
-        if not raw_schema.tables:
-            raise HTTPException(
-                status_code=400, detail="No valid CREATE TABLE statements found in DDL."
-            )
-
-        # 1. 외래키 추론
-        inferred = infer_foreign_keys(raw_schema)
-        enriched_schema = (
-            raw_schema.with_foreign_keys(raw_schema.foreign_keys + inferred)
-            if inferred
-            else raw_schema
+    schema = DDLIntrospector(req.ddl).introspect()
+    if not schema.tables:
+        raise HTTPException(
+            status_code=400, detail="No valid CREATE TABLE statements found in DDL."
         )
+    return schema, {"infer_missing_keys": True}, {}
+
+
+@app.post("/api/fold")
+def run_fold(req: FoldRequest) -> dict[str, Any]:
+    try:
+        raw_schema, fold_options, source_meta = _load_source(req)
+        baseline_ddl = source_meta.pop("ddl", None) or req.ddl
+
+        # 1. 외래키 추론 — 라이브 소스는 이미 데이터로 검증된 키를 들고 온다.
+        if fold_options.get("infer_missing_keys"):
+            inferred = infer_foreign_keys(raw_schema)
+            enriched_schema = (
+                raw_schema.with_foreign_keys(raw_schema.foreign_keys + inferred)
+                if inferred
+                else raw_schema
+            )
+        else:
+            inferred = raw_schema.foreign_keys
+            enriched_schema = raw_schema
 
         # 2. 그래프 구축 및 프로파일링 (Fact Score)
         graph = SchemaGraph.build(enriched_schema)
         profiles = profile_tables(graph)
 
+        max_areas = fold_options.pop("max_areas", req.max_areas)
+        field_budget = fold_options.pop("field_budget", req.field_budget)
         policy = SelectionPolicy(
             coverage_target=req.coverage,
             min_gain=req.min_gain,
             max_fields_per_table=req.max_cost,
-            max_areas=req.max_areas,
+            max_areas=max_areas,
         )
 
         # 3. 후보 격자 (Candidate Lattice) 수치 측정
@@ -100,10 +183,10 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
 
         # 4. 폴딩 실행 (Tier-1 Core Models)
         result = fold(
-            raw_schema,
+            enriched_schema,
             policy=policy,
-            field_budget=req.field_budget,
-            infer_missing_keys=True,
+            field_budget=field_budget,
+            **fold_options,
         )
 
         layer_dict = emit.to_dict(result.layer)
@@ -206,7 +289,37 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
         
         full_2tier_prompt_text = core_prompt_text + "\n".join(edge_prompt_lines)
 
+        # 10. 반영도 — 얼마나 줄었나(위의 size)와 짝을 이루는 "무엇을 잃었나".
+        #     둘 중 하나만 보이면 테이블을 버려서 좋아지는 지표가 된다.
+        measured = fid.measure(result.layer, result.graph)
+
+        # 11. 계보 — 화면이 ERD 처럼 그릴 수 있게 노드/엣지로 뒤집은 같은 사실.
+        lineage_graph = lin.to_graph(
+            result.layer,
+            result.graph,
+            profiles={
+                p.name.lower(): {
+                    "score": p.score,
+                    "role": p.role.value,
+                    "in_degree": p.in_degree,
+                    "out_degree": p.out_degree,
+                }
+                for p in profiles
+            },
+            criteria={
+                "coverage_target": req.coverage,
+                "min_gain": req.min_gain,
+                "max_fields_per_table": req.max_cost,
+                "field_budget": field_budget,
+                "max_areas": max_areas,
+                "anchor_mode": req.anchor_mode,
+            },
+        )
+
         return {
+            "fidelity": fid.to_dict(measured),
+            "fidelity_report": fid.render_report(measured),
+            "lineage": lineage_graph,
             "tier_summary": {
                 "tier1_core_models_count": len(result.layer.models),
                 "tier1_covered_physical_tables_count": len(covered_table_names),
@@ -216,7 +329,7 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
             # 화면 상단의 "무엇이 줄었나"를 정직하게 표시하기 위한 실측값.
             # 모델 수가 아니라 실제로 프롬프트에 들어가는 글자 수가 기준이다.
             "size": {
-                "ddl_chars": len(req.ddl),
+                "ddl_chars": len(baseline_ddl),
                 "core_prompt_chars": len(core_prompt_text),
                 "full_prompt_chars": len(full_2tier_prompt_text),
                 "total_columns": sum(len(t.columns) for t in raw_schema.tables),
@@ -235,6 +348,7 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
                 "candidates_count": len(lattice.candidates),
                 "candidates": candidates_detailed,
             },
+            "source": {"kind": req.source, "anchor_mode": req.anchor_mode, **source_meta},
             "logical": layer_dict,
             "prompt_text": full_2tier_prompt_text,
             "core_prompt_text": core_prompt_text,
@@ -246,19 +360,22 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
 
 @app.post("/api/expand")
 def run_expand(req: ExpandRequest) -> dict[str, Any]:
-    if not req.ddl.strip() or not req.sql.strip():
-        raise HTTPException(status_code=400, detail="DDL and SQL query are required.")
+    if not req.sql.strip():
+        raise HTTPException(status_code=400, detail="SQL query is required.")
 
     try:
-        introspector = DDLIntrospector(req.ddl)
-        schema = introspector.introspect()
+        schema, fold_options, _ = _load_source(req)
+        max_areas = fold_options.pop("max_areas", req.max_areas)
+        field_budget = fold_options.pop("field_budget", req.field_budget)
         policy = SelectionPolicy(
             coverage_target=req.coverage,
             min_gain=req.min_gain,
             max_fields_per_table=req.max_cost,
-            max_areas=req.max_areas,
+            max_areas=max_areas,
         )
-        result = fold(schema, policy=policy, field_budget=req.field_budget)
+        result = fold(
+            schema, policy=policy, field_budget=field_budget, **fold_options
+        )
 
         expansion = expand(req.sql, result.layer, result.graph)
 

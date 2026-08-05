@@ -50,6 +50,8 @@ def fold(
     field_budget: int = DEFAULT_FIELD_BUDGET,
     infer_missing_keys: bool = True,
     include_aggregates: bool = True,
+    prefix_joined_fields: bool = True,
+    expose_child_filters: bool = False,
 ) -> FoldResult:
     """Fold a physical schema into as few wide logical models as ``policy`` allows.
 
@@ -79,6 +81,8 @@ def fold(
         policy=policy,
         selector=selector,
         max_hops=max_hops,
+        include_aggregates=include_aggregates,
+        expose_child_filters=expose_child_filters,
     )
     layer = compose(
         graph,
@@ -87,6 +91,8 @@ def fold(
             max_hops=max_hops,
             field_budget=field_budget,
             include_aggregates=include_aggregates,
+            prefix_joined_fields=prefix_joined_fields,
+            expose_child_filters=expose_child_filters,
         ),
     )
 

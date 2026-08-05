@@ -152,6 +152,19 @@ class LogicalField:
     source: FieldSource
     description: str | None = None
 
+    filter_only: bool = False
+    """WHERE 절에서만 쓸 수 있고 SELECT 에는 쓸 수 없는 필드.
+
+    집계된 자식의 원본 컬럼을 위해 존재한다. ``F_SALES`` 를 조직 단위로 접으면
+    ``SUM(SALES_AMT)`` 은 남지만 ``YYYYMMDD`` 는 집계 과정에서 사라진다. 그러면
+    "이번 달 매출"을 물을 방법이 없어진다 — 사전집계된 값에는 기간을 걸 수단이
+    없기 때문이다.
+
+    이 필드는 그 기간 조건을 받는 자리다. 값으로 꺼낼 수는 없고(자식 행마다
+    다르므로 앵커 한 행에 대응하는 값이 없다), :mod:`tablefold.expansion.expand`
+    가 조건을 해당 집계 서브쿼리 *안* 으로 밀어 넣는다.
+    """
+
 
 @dataclass(frozen=True)
 class LogicalModel:
@@ -231,8 +244,22 @@ class LogicalLayer:
 # ``addresse``로 다른 쪽에서는 ``address``로 갈렸다. 한 벌, 한 가지 답.
 
 
+# 단수와 복수가 같은 낱말. 규칙으로는 잡히지 않는다 — `series`는 `ies` 규칙에
+# 걸려 `sery`가 되고, `news`는 뒤의 `s`가 떨어져 `new`가 된다.
+_UNCHANGED_PLURALS = frozenset(
+    {"series", "species", "news", "data", "metadata", "media", "sales", "means"}
+)
+
+
 def singular(name: str) -> str:
     lowered = name.lower()
+    if lowered in _UNCHANGED_PLURALS:
+        return lowered
+    # 이름이 접두사를 달고 있어도 어간은 같다: `F_SALES` 의 어간은 `sales` 다.
+    tail = lowered.rsplit("_", 1)[-1]
+    if tail in _UNCHANGED_PLURALS:
+        return lowered
+
     for plural_suffix, stem_suffix in (
         ("ies", "y"),
         ("sses", "ss"),

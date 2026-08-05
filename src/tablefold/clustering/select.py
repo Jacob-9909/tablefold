@@ -191,6 +191,47 @@ class Selector(Protocol):
         ...
 
 
+# ── explicit ──────────────────────────────────────────────────────────────────
+
+
+class ExplicitSelector:
+    """호출자가 앵커를 직접 지정한다.
+
+    스타 스키마에서는 앵커가 자명하다 — 팩트 테이블이 곧 앵커고, 차원은 그 위로
+    인라인된다. 그런 스키마에서 탐욕적 집합 커버를 돌리는 것은 이미 아는 답을
+    다시 찾는 일이고, 커버리지 목표나 ``min_gain`` 같은 정지 규칙이 오히려
+    의도한 앵커를 탈락시킬 수 있다.
+
+    래티스에 없는 이름은 조용히 버린다. :class:`LLMSelector` 와 같은 규칙이며,
+    이유도 같다 — 존재하지 않는 앵커는 ``compose`` 까지 흘러가서 거기서 터지느니
+    선택 단계에서 사라지는 편이 낫다.
+    """
+
+    def __init__(self, anchors: tuple[str, ...] | list[str]) -> None:
+        self._anchors = tuple(anchors)
+
+    def select(self, lattice: CandidateLattice, policy: SelectionPolicy) -> Selection:
+        if not lattice.candidates:
+            return Selection((), StopReason.NO_CANDIDATES, self.label)
+
+        chosen: list[Choice] = []
+        seen: set[str] = set()
+        for name in self._anchors:
+            candidate = lattice.get(name)
+            if candidate is None or candidate.name.lower() in seen:
+                continue
+            seen.add(candidate.name.lower())
+            chosen.append(Choice(anchor=candidate.name))
+            if policy.max_areas is not None and len(chosen) >= policy.max_areas:
+                break
+
+        return Selection(tuple(chosen), StopReason.SELECTOR_CHOSE, self.label)
+
+    @property
+    def label(self) -> str:
+        return "explicit"
+
+
 # ── greedy ────────────────────────────────────────────────────────────────────
 
 

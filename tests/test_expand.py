@@ -3,11 +3,11 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-
 from tablefold.classify import profile_tables
 from tablefold.cluster import SelectionPolicy, cluster
-from tablefold.compose import compose
+from tablefold.compose import ComposeOptions, compose
 from tablefold.expand import ExpansionError, expand
+from tablefold.ir import FieldKind
 
 
 @pytest.fixture
@@ -198,6 +198,56 @@ def test_unknown_field_is_rejected_with_a_hint(tiny_layer, tiny_graph):
         expand("SELECT nonexistent_field FROM orders", tiny_layer, tiny_graph)
 
 
+def test_an_unknown_field_mixed_with_known_ones_is_still_rejected(
+    tiny_layer, tiny_graph
+):
+    """부분 매칭이 통과하면 안 된다.
+
+    예전에는 아는 필드가 하나라도 있으면 모르는 이름이 섞여도 통과했다. 그러면
+    그 이름은 CTE에 투영되지 않은 채 바깥 SELECT에 남고, 실패는 여기가 아니라
+    데이터베이스에서 일어난다 — 이름을 지어낸 곳에서 멀리 떨어진 지점이다.
+    """
+    with pytest.raises(ExpansionError, match="unknown fields"):
+        expand("SELECT id, nonexistent_field FROM orders", tiny_layer, tiny_graph)
+
+
+def test_an_output_alias_is_not_mistaken_for_an_unknown_field(tiny_layer, tiny_graph):
+    """질의가 스스로 만든 이름은 모델의 필드가 아니어도 정상이다."""
+    result = expand(
+        "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue",
+        tiny_layer,
+        tiny_graph,
+    )
+    assert "revenue" in result.sql
+
+
+def test_joined_fields_can_keep_their_original_names(retail_graph):
+    """``prefix_joined_fields=False`` 는 원본 컬럼 이름을 그대로 쓴다.
+
+    테이블 이름이 사람이 읽을 말이 아닌 웨어하우스 스키마에서 필요하다 —
+    ``D_SA_ORG.HEAD_NM`` 이 ``d_sa_org_HEAD_NM`` 이 되면 그 스키마의 실제
+    질의와 어긋난다.
+    """
+    clustering = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=2)
+    )
+    layer = compose(
+        retail_graph,
+        clustering,
+        options=ComposeOptions(prefix_joined_fields=False, max_hops=1),
+    )
+
+    joined = [
+        f
+        for m in layer.models
+        for f in m.fields
+        if f.source.kind is FieldKind.JOINED
+    ]
+    assert joined
+    # 접두사가 붙지 않았으므로 이름이 원본 컬럼과 같거나, 충돌해서 구분된 것뿐이다.
+    assert any(f.name == f.source.column for f in joined)
+
+
 def test_unparseable_sql_is_rejected(tiny_layer, tiny_graph):
     with pytest.raises(ExpansionError, match="could not parse"):
         expand("SELECT FROM WHERE", tiny_layer, tiny_graph)
@@ -223,3 +273,64 @@ def test_every_model_field_expands(retail_graph):
                 f'SELECT "{field.name}" FROM "{model.name}"', layer, retail_graph
             )
             assert field.name in expansion.sql
+
+
+# ── 술어 밀어넣기 ─────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def filterable_layer(retail_graph):
+    """자식의 원본 컬럼을 필터 전용으로 노출한 레이어."""
+    clustering = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=2)
+    )
+    return compose(
+        retail_graph, clustering, options=ComposeOptions(expose_child_filters=True)
+    )
+
+
+def test_a_filter_on_a_child_column_lands_inside_the_aggregate(
+    filterable_layer, retail_graph
+):
+    """사전집계에 조건을 거는 유일한 방법.
+
+    ``SUM(...)`` 은 이미 전체를 더한 뒤이므로 바깥에서 자식의 행을 고를 수 없다.
+    조건이 GROUP BY 앞으로 들어가야 "이 조건에 맞는 행만" 더해진다.
+    """
+    expansion = expand(
+        "SELECT id, order_items_quantity_sum FROM orders "
+        "WHERE order_items_product_id = 7",
+        filterable_layer,
+        retail_graph,
+    )
+
+    body = expansion.sql.split("SELECT\n  id")[0]
+    assert "product_id = 7" in body
+    assert "GROUP BY" in body
+    # 조건은 서브쿼리로 옮겨졌으므로 바깥 필드 이름으로는 남지 않는다.
+    assert "order_items_product_id" not in expansion.sql
+
+
+def test_a_filter_only_field_cannot_be_selected(filterable_layer, retail_graph):
+    """값으로 꺼낼 수 없는 필드다. 자식 행마다 달라 앵커 한 행에 대응이 없다."""
+    with pytest.raises(ExpansionError, match="filter-only"):
+        expand(
+            "SELECT order_items_product_id FROM orders",
+            filterable_layer,
+            retail_graph,
+        )
+
+
+def test_a_filter_only_field_inside_an_or_is_rejected(filterable_layer, retail_graph):
+    """OR 는 쪼개면 뜻이 달라지므로 밀어넣지 않고, 남으면 거부한다."""
+    with pytest.raises(ExpansionError, match="filter-only"):
+        expand(
+            "SELECT id FROM orders WHERE order_items_product_id = 7 OR id > 10",
+            filterable_layer,
+            retail_graph,
+        )
+
+
+def test_filters_are_off_by_default(tiny_layer):
+    """기본값에서는 필터 전용 필드가 생기지 않는다 — 레이어가 부풀지 않도록."""
+    assert not [f for m in tiny_layer.models for f in m.fields if f.filter_only]

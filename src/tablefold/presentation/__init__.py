@@ -1,3 +1,4 @@
+from tablefold.presentation import fidelity, lineage
 from tablefold.presentation.cost import DEFAULT_FIELD_BUDGET, estimate_fields
 from tablefold.presentation.emit import (
     render_report,
@@ -13,6 +14,8 @@ __all__ = [
     "LLMUnavailable",
     "anthropic_completer",
     "estimate_fields",
+    "fidelity",
+    "lineage",
     "render_report",
     "render_text",
     "to_dict",

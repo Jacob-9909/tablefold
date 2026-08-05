@@ -30,15 +30,18 @@ from tablefold.presentation.cost import (
     MAX_MODEL_FIELDS,
     NUMERIC_AGGREGATES,
     aggregatable_columns,
+    filterable_columns,
     promotable_columns,
 )
 from tablefold.schema.ir import (
+    Cardinality,
     FieldKind,
     FieldSource,
     JoinStep,
     LogicalField,
     LogicalLayer,
     LogicalModel,
+    PhysicalColumn,
     PhysicalTable,
     plural,
     singular,
@@ -57,6 +60,30 @@ class ComposeOptions:
 
     include_foreign_key_columns: bool = False
     include_aggregates: bool = True
+
+    expose_child_filters: bool = False
+    """집계된 자식의 원본 컬럼을 필터 전용 필드로 노출할지.
+
+    사전집계된 값에는 기간을 걸 수 없다 — ``SUM(SALES_AMT)`` 은 이미 전 기간을
+    더한 뒤다. 이 옵션을 켜면 ``F_SALES_YYYYMMDD`` 같은 필드가 생기고,
+    ``expand`` 가 거기 걸린 조건을 집계 서브쿼리 *안* 으로 밀어 넣는다.
+
+    기본값이 꺼짐인 이유는 값이 아니라 통로일 뿐인 필드가 자식 컬럼 수만큼
+    늘어나기 때문이다. 차원을 앵커로 삼아 여러 팩트를 나란히 놓는 질의처럼,
+    사전집계에 조건을 걸어야 하는 경우에만 켠다.
+    """
+
+    prefix_joined_fields: bool = True
+    """인라인된 컬럼에 원본 테이블 이름을 접두사로 붙일지.
+
+    켜 두면 ``customers.email`` 이 ``customer_email`` 이 된다. 넓은 모델에서
+    ``email`` 만 있으면 누구의 이메일인지 모르므로 보통은 이쪽이 낫다.
+
+    끄면 원래 컬럼 이름을 그대로 쓰고, 충돌할 때만 ``_disambiguate`` 가 경로로
+    구분한다. 테이블 이름 자체가 사람이 읽을 말이 아닌 웨어하우스 스키마에서
+    필요하다 — ``D_SA_ORG.HEAD_NM`` 은 ``d_sa_org_HEAD_NM`` 이 되는데, 이 스키마의
+    실제 질의는 ``HEAD_NM`` 을 그대로 쓴다.
+    """
 
 
 def compose(
@@ -135,7 +162,7 @@ def _draft(
             # 집계는 2홉 조인보다 앞선다. 자식 행 수가 먼 곳의 라벨보다
             # 답이 되는 경우가 많다.
             candidates.extend(
-                (2, f) for f in _aggregated_fields(child_table, step, graph)
+                (2, f) for f in _aggregated_fields(child_table, step, graph, opts)
             )
 
     return _Draft(
@@ -184,10 +211,17 @@ def _joined_fields(
     opts: ComposeOptions,
 ) -> list[LogicalField]:
     """참조된 테이블의 서술적 컬럼을 앵커 위로 승격한다."""
-    prefix = singular(table.name)
+    # 참조 키가 역할을 담고 있으면 그것을 접두사로 쓴다. ``buyer_id`` 로 간
+    # ``users.username`` 은 ``user_username`` 이 아니라 ``buyer_username`` 이다.
+    # 같은 대상으로 가는 경로가 둘일 때 한쪽만 역할 이름을 갖는 비대칭을 없앤다.
+    prefix = (path and _join_role(path[-1])) or singular(table.name)
     return [
         LogicalField(
-            name=_prefixed(prefix, column.name),
+            name=(
+                _prefixed(prefix, column.name)
+                if opts.prefix_joined_fields
+                else column.name
+            ),
             type=column.type,
             source=FieldSource(
                 kind=FieldKind.JOINED,
@@ -202,7 +236,7 @@ def _joined_fields(
 
 
 def _aggregated_fields(
-    table: PhysicalTable, step: JoinStep, graph: SchemaGraph
+    table: PhysicalTable, step: JoinStep, graph: SchemaGraph, opts: ComposeOptions
 ) -> list[LogicalField]:
     """자식 테이블을 부모 입도의 측정값으로 축소한다."""
     prefix = plural(table.name)
@@ -222,7 +256,8 @@ def _aggregated_fields(
         )
     ]
 
-    for column in aggregatable_columns(table, graph):
+    measures = aggregatable_columns(table, graph)
+    for column in measures:
         for aggregate in NUMERIC_AGGREGATES:
             fields.append(
                 LogicalField(
@@ -237,7 +272,42 @@ def _aggregated_fields(
                     ),
                 )
             )
+
+    if opts.expose_child_filters:
+        fields.extend(_filter_fields(table, step, graph, measures, prefix))
     return fields
+
+
+def _filter_fields(
+    table: PhysicalTable,
+    step: JoinStep,
+    graph: SchemaGraph,
+    measures: tuple[PhysicalColumn, ...],
+    prefix: str,
+) -> list[LogicalField]:
+    """집계된 자식에 조건을 걸 수 있게 원본 컬럼을 필터 전용으로 노출한다.
+
+    측정값과 조인 키는 제외한다. 측정값은 이미 집계로 나가 있고, 조인 키는
+    앵커 쪽에 같은 값이 있다. 남는 것은 기간·통화·구분 같은 것들이고, 그게
+    사전집계에 조건을 거는 유일한 통로다.
+    """
+    # 어느 컬럼이 필터가 되는지의 규칙은 ``cost`` 에 한 벌만 둔다. 선택 단계가
+    # 후보 가격을 매길 때 같은 규칙을 읽어야 추정과 실제가 어긋나지 않는다.
+    return [
+        LogicalField(
+            name=f"{prefix}_{column.name}",
+            type=column.type,
+            source=FieldSource(
+                kind=FieldKind.AGGREGATED,
+                table=table.name,
+                column=column.name,
+                path=(step,),
+            ),
+            description=f"Filters the {table.name} rows folded into this row.",
+            filter_only=True,
+        )
+        for column in filterable_columns(table, graph, step, measures)
+    ]
 
 
 # ── budget and naming ─────────────────────────────────────────────────────────
@@ -305,17 +375,65 @@ def _deduplicate(
     return kept
 
 
+# 참조 컬럼 이름에서 떼면 역할만 남는 꼬리표. ``seller_id`` → ``seller``.
+_ROLE_SUFFIXES = ("_id", "_cd", "_code", "_key", "_no", "_num", "_fk")
+
+
 def _disambiguate(field: LogicalField) -> str:
     """조인 경로를 이용해 이름 충돌을 구분한다.
 
-    ``addresses``를 거쳐 온 ``countries.name``과 ``stores``를 거쳐 온 것은 이름만
-    같은 다른 컬럼이고, 둘을 구분하는 것은 경로뿐이므로 경로가 이름에 들어간다.
+    구분 정보는 대개 대상 테이블이 아니라 **어느 키로 갔는가** 에 있다.
+    ``orders.buyer_id`` 와 ``orders.seller_id`` 는 둘 다 ``users`` 로 가므로
+    출발 테이블 이름(``order``)을 붙여 봐야 ``order_user_username`` 이라는, 어느
+    쪽인지 알려 주지 않는 이름이 된다. 키에서 역할을 떼면 ``seller_username`` 이
+    되고, 이건 사람이 붙였을 이름과 같다.
+
+    키에서 아무것도 못 얻으면 경로의 출발 테이블로 되돌아간다 — ``addresses``를
+    거쳐 온 ``countries.name``과 ``stores``를 거쳐 온 것을 구분하는 경우다.
     """
     source = field.source
     if not source.path:
         return f"{singular(source.table)}_{source.column}"
-    via = singular(source.path[-1].from_table)
+
+    last = source.path[-1]
+    role = _join_role(last)
+
+    if role and last.cardinality is Cardinality.ONE_TO_MANY:
+        # 집계 필드의 이름에는 컬럼이 아니라 집계가 들어 있고(``..._count``),
+        # ``source.column`` 은 ``*`` 일 수도 있다. 이름 앞에 역할만 붙인다.
+        return f"{role}_{field.name}"
+    if role:
+        return f"{role}_{source.column}"
+
+    via = singular(last.from_table)
     return f"{via}_{field.name}"
+
+
+def _join_role(step: JoinStep) -> str | None:
+    """이 조인 단계를 다른 단계와 구분하는 역할 이름.
+
+    구분 정보는 대상 테이블이 아니라 **어느 키로 갔는가** 에 있다. 방향에 따라
+    보아야 할 쪽이 다르다 — 정방향은 앵커가 들고 있는 키(``seller_id``), 역방향은
+    자식이 들고 있는 키(``dst_order_id``)가 그 역할을 담는다.
+
+    키에서 얻은 이름이 대상 테이블 이름과 같으면 아무것도 구분해 주지 못하므로
+    ``None`` 을 돌려주고, 호출부가 경로로 되돌아가게 한다.
+    """
+    columns = (
+        step.to_columns
+        if step.cardinality is Cardinality.ONE_TO_MANY
+        else step.from_columns
+    )
+    if len(columns) != 1:
+        return None
+
+    lowered = columns[0].lower()
+    for suffix in _ROLE_SUFFIXES:
+        if lowered.endswith(suffix) and len(lowered) > len(suffix):
+            role = lowered[: -len(suffix)]
+            related = {singular(step.to_table), singular(step.from_table)}
+            return role if role not in related else None
+    return None
 
 
 def _prefixed(prefix: str, column: str) -> str:

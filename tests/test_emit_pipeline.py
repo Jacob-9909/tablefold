@@ -4,12 +4,12 @@ import json
 
 import pytest
 import yaml
+from tablefold.cluster import SelectionPolicy
+from tablefold.ir import FieldKind
 from typer.testing import CliRunner
 
 from tablefold import emit
 from tablefold.cli import app
-from tablefold.cluster import SelectionPolicy
-from tablefold.ir import FieldKind
 from tablefold.pipeline import fold
 from tests.conftest import FIXTURES
 
@@ -86,7 +86,20 @@ def test_prompt_text_groups_fields_by_kind(retail_fold):
 
     assert "Own columns:" in text
     assert "Joined in (one related row each):" in text
-    assert "Aggregated from child rows:" in text
+    assert "Aggregated from child rows" in text
+
+
+def test_prompt_text_states_the_rules_it_expects_to_be_followed(retail_fold):
+    """묶음 이름만으로는 규칙이 전달되지 않는다.
+
+    "Aggregated from child rows" 를 보고 그 값이 이미 총계라는 것까지 읽어내리라
+    기대할 수 없다. 반대로 ``SUM`` 을 금지해서도 안 된다 — 앵커 행들에 걸친 롤업은
+    이중 계산이 아니고, NL2SQL 실측에서 원본 합계와 마지막 자리까지 일치했다.
+    """
+    text = emit.render_text(retail_fold.layer)
+
+    assert "모델끼리 JOIN 하지 않는다" in text
+    assert "이중 계산 아님" in text
 
 
 def test_prompt_text_fits_a_context_window(retail_fold):

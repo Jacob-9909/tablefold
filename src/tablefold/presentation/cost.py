@@ -23,6 +23,20 @@ from tablefold.schema.ir import PhysicalColumn, PhysicalTable
 # Columns that carry no business meaning at any grain.
 NOISE_SUFFIXES = ("_hash", "_token", "_secret", "_password", "_salt")
 
+# 적재 메타데이터. 어느 테이블에나 있고 어떤 질문에도 답하지 않는다.
+#
+# NL2SQL 스키마에서 이것들이 155개 참조 컬럼 중 20개를 차지했고, 그중 10개는
+# 데이터가 전부 NULL 이었다. 필드 예산을 쓰면서 읽는 쪽에는 고를 이유가 없는
+# 선택지만 늘린다 — 골드셋에서 실제로 값이 빈 컬럼이 답으로 골라졌다.
+NOISE_NAMES = frozenset(
+    {
+        "load_dt", "load_user", "load_date", "load_time",
+        "etl_dt", "etl_id", "etl_user", "etl_date",
+        "create_dt", "update_dt", "insert_dt", "modify_dt",
+        "reg_dt", "chg_dt", "dw_load_dt",
+    }
+)
+
 # 자식 숫자형 컬럼 하나당 방출되는 집계 목록.
 #
 # `avg`는 의도적으로 뺐다. 모든 모델이 `<child>_count`를 갖고 있으므로 평균은
@@ -47,7 +61,10 @@ DEFAULT_FIELD_BUDGET = 200
 
 
 def is_noise(column_name: str) -> bool:
-    return any(column_name.lower().endswith(suffix) for suffix in NOISE_SUFFIXES)
+    lowered = column_name.lower()
+    if lowered in NOISE_NAMES:
+        return True
+    return any(lowered.endswith(suffix) for suffix in NOISE_SUFFIXES)
 
 
 def fk_columns(table: PhysicalTable, graph: SchemaGraph) -> set[str]:
@@ -93,12 +110,21 @@ def estimate_fields(
     *,
     max_hops: int,
     cap: int = MAX_MODEL_FIELDS,
+    include_aggregates: bool = True,
+    expose_child_filters: bool = False,
 ) -> int:
     """Fields a model anchored on *anchor* would carry.
 
     An upper bound before name deduplication, which is what selection wants: it
     is exact for any model big enough to hit the cap, and only slightly high for
     the small ones, where a few duplicate names are the difference.
+
+    ``include_aggregates`` 와 ``expose_child_filters`` 는 :class:`ComposeOptions`
+    의 같은 이름 옵션과 같은 뜻이며, 반드시 같은 값으로 넘겨야 한다. 이 모듈이
+    존재하는 이유가 추정과 실제가 같은 규칙을 읽게 하는 것인데, 이 두 옵션을
+    빼먹은 동안 추정이 실제의 절반도 안 됐다 — retail 의 ``customers`` 는
+    27 로 값이 매겨졌지만 실제로는 64 개 필드를 냈다. 심사 규칙
+    (``estimated_fields / gain``) 이 그만큼 싸게 통과시켰다는 뜻이다.
     """
     table = graph.schema.table(anchor)
     if table is None:
@@ -111,12 +137,40 @@ def estimate_fields(
         if joined is not None:
             total += len(promotable_columns(joined, graph, drop_primary_key=True))
 
-    for child, _ in graph.children(anchor):
-        child_table = graph.schema.table(child)
-        if child_table is not None:
+    if include_aggregates:
+        for child, step in graph.children(anchor):
+            child_table = graph.schema.table(child)
+            if child_table is None:
+                continue
+            measures = aggregatable_columns(child_table, graph)
             # COUNT 하나, 그리고 집계 가능한 컬럼마다 집계 하나씩.
-            total += 1 + len(aggregatable_columns(child_table, graph)) * len(
-                NUMERIC_AGGREGATES
-            )
+            total += 1 + len(measures) * len(NUMERIC_AGGREGATES)
+            if expose_child_filters:
+                total += len(filterable_columns(child_table, graph, step, measures))
 
     return min(total, cap)
+
+
+def filterable_columns(
+    table: PhysicalTable,
+    graph: SchemaGraph,
+    step: object,
+    measures: tuple[PhysicalColumn, ...],
+) -> tuple[PhysicalColumn, ...]:
+    """집계된 자식에서 필터 전용 필드가 될 컬럼.
+
+    ``compose._filter_fields`` 와 같은 규칙이다. 한 벌만 두는 것이 이 모듈의
+    존재 이유이므로 규칙은 여기 있고 양쪽이 읽는다.
+    """
+    aggregated = {c.name.lower() for c in measures}
+    join_key = {c.lower() for c in getattr(step, "to_columns", ())}
+    return tuple(
+        c
+        for c in promotable_columns(
+            table,
+            graph,
+            drop_primary_key=len(table.primary_key) == 1,
+            drop_foreign_keys=False,
+        )
+        if c.name.lower() not in aggregated and c.name.lower() not in join_key
+    )

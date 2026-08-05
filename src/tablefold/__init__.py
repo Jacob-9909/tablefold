@@ -7,6 +7,10 @@ from tablefold.clustering.cluster import Clustering, SubjectArea, cluster
 from tablefold.clustering.select import LLMSelector, SelectionPolicy, Selector
 from tablefold.composition.compose import ComposeOptions, compose
 from tablefold.expansion.expand import ExpansionError, expand
+
+# `tablefold.graph` 는 아래에서 서브모듈로 치환되므로, 그 패키지 안의 다른 모듈은
+# 치환 전에 가져와 여기서 재노출한다.
+from tablefold.graph.from_keys import infer_from_primary_keys  # noqa: E402
 from tablefold.graph.graph import SchemaGraph, infer_foreign_keys
 from tablefold.pipeline.pipeline import FoldResult, fold
 from tablefold.presentation.cost import DEFAULT_FIELD_BUDGET, estimate_fields
@@ -68,6 +72,7 @@ __all__ = [
     "Selector",
     "SubjectArea",
     "TableProfile",
+    "infer_from_primary_keys",
     "cluster",
     "compose",
     "estimate_fields",

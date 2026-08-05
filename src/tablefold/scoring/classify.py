@@ -104,19 +104,28 @@ def _profile_one(
 
     out_signal = out_degree / max_out if max_out else 0.0
 
+    # 관측하지 못한 신호는 상수로 메우지 않고 **항 자체를 뺀 뒤 정규화**한다.
+    #
+    # 예전에는 행 수를 모를 때 ``size_signal = 0.5`` 을 썼다. 두 가지가 틀어졌다.
+    # DDL 텍스트처럼 통계가 아예 없는 스키마에서는 모든 테이블에 같은 상수가
+    # 더해져 가중치의 15%가 순위에 아무 기여도 못 하면서 임계값만 위로 밀었다.
+    # 더 나쁜 쪽은, 스키마 안의 *다른* 테이블 하나가 통계를 가지고 있느냐에 따라
+    # 같은 테이블의 점수가 0.3235 와 0.35 사이를 오가며 역할이 DIMENSION 과 FACT
+    # 로 뒤집혔다는 것이다. 자기 자신에 대해 아무것도 달라진 것이 없는데도.
+    #
+    # 항을 빼면 점수는 그 테이블에 대해 실제로 관측된 것들만으로 결정된다.
+    terms = [
+        (_W_MEASURE, measure_density),
+        (_W_TEMPORAL, temporal_signal),
+        (_W_OUT_DEGREE, out_signal),
+    ]
     if table.row_estimate and max_log_rows:
-        size_signal = math.log10(table.row_estimate + 1) / max_log_rows
-    else:
-        # No statistics available. Stay neutral rather than penalising a table
-        # for a fact the introspector could not observe.
-        size_signal = 0.5
+        terms.append(
+            (_W_SIZE, math.log10(table.row_estimate + 1) / max_log_rows)
+        )
 
-    score = (
-        _W_MEASURE * measure_density
-        + _W_TEMPORAL * temporal_signal
-        + _W_OUT_DEGREE * out_signal
-        + _W_SIZE * size_signal
-    )
+    total_weight = sum(weight for weight, _ in terms)
+    score = sum(weight * value for weight, value in terms) / total_weight
 
     if out_degree == 0 and in_degree == 0:
         role = TableRole.ISOLATED
