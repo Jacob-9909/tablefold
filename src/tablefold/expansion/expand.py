@@ -669,9 +669,8 @@ def _aggregate_subquery(
     # 그렇다) 데이터베이스가 "Ambiguous column name" 으로 거절한다.
     needs_dim = any(len(f.source.path) > 1 for _, f in (predicates or []))
     src = _CHILD_ALIAS if needs_dim else None
-    col = (
-        (lambda name: _column(src, name)) if src else (lambda name: exp.Column(this=_ident(name)))
-    )
+    def col(name: str) -> exp.Column:
+        return _column(src, name) if src else exp.Column(this=_ident(name))
 
     group_columns = [col(c) for c in step.to_columns]
     projections: list[exp.Expression] = list(group_columns)
