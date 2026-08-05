@@ -36,6 +36,9 @@ from tablefold.schema.ir import (
 
 _BASE_ALIAS = "base"
 
+# 집계 서브쿼리 안에서 자식 테이블에 붙이는 별칭.
+_CHILD_ALIAS = "src"
+
 # 인용하지 않으면 파서가 문법 요소로 읽어 버리는 이름들.
 #
 # sqlglot 은 방언별 예약어 목록을 노출하지 않는다 (``RESERVED_KEYWORDS`` 가 비어
@@ -301,7 +304,9 @@ def _split_conjuncts(where: exp.Expression | None) -> list[exp.Expression]:
 
 def _pushdown(
     statement: exp.Expression, models: tuple[LogicalModel, ...]
-) -> tuple[exp.Expression, dict[tuple[str, str], list[exp.Expression]]]:
+) -> tuple[
+    exp.Expression, dict[tuple[str, str], list[tuple[exp.Expression, LogicalField]]]
+]:
     """필터 전용 필드에 걸린 조건을 해당 집계 서브쿼리로 옮긴다.
 
     사전집계된 값에는 기간을 걸 수 없다 — ``SUM(SALES_AMT)`` 은 이미 전 기간을
@@ -314,7 +319,10 @@ def _pushdown(
     OR 로 묶인 조건은 쪼개면 뜻이 달라지므로 손대지 않는다 — 그런 조건이 필터
     전용 필드를 건드리면 :func:`expand` 가 거부한다.
 
-    반환값의 두 번째 항목은 ``(모델, 자식 테이블) -> 조건들`` 이다.
+    반환값의 두 번째 항목은 ``(모델, 자식 테이블) -> [(조건, 필드)]`` 이다.
+    필드를 같이 들고 다니는 이유는, 조건이 자식이 아니라 자식이 *가리키는*
+    차원에 걸릴 수 있기 때문이다. 그 경우 집계 서브쿼리 안에 조인이 하나 더
+    필요하고, 어느 조인인지는 필드의 경로에만 적혀 있다.
     """
     # 이름 하나에 여러 (모델, 필드) 가 걸릴 수 있다. 딕셔너리로 덮어쓰면 나중
     # 것이 이기고, 조건이 사용자가 지목하지 않은 모델의 서브쿼리로 조용히
@@ -332,7 +340,7 @@ def _pushdown(
         return statement, {}
 
     rewritten = statement.copy()
-    pushed: dict[tuple[str, str], list[exp.Expression]] = {}
+    pushed: dict[tuple[str, str], list[tuple[exp.Expression, LogicalField]]] = {}
 
     for select in rewritten.find_all(exp.Select):
         where = select.args.get("where")
@@ -358,13 +366,20 @@ def _pushdown(
 
             model, field = owners[0]
             moved = part.copy()
+            # 자식 자신의 컬럼이면 한정자 없이, 자식이 가리키는 차원의 컬럼이면
+            # 서브쿼리 안에서 그 차원에 붙일 별칭으로 한정한다.
+            qualifier = (
+                _dim_alias(field.source.path[1]) if len(field.source.path) > 1 else None
+            )
             for column in moved.find_all(exp.Column):
                 if column.name.lower() == field.name.lower():
                     column.set("this", _ident(field.source.column))
-                    column.set("table", None)
+                    column.set(
+                        "table", exp.to_identifier(qualifier) if qualifier else None
+                    )
             pushed.setdefault(
                 (model.name.lower(), field.source.path[0].to_table.lower()), []
-            ).append(moved)
+            ).append((moved, field))
 
         select.set(
             "where", exp.Where(this=_conjunction(keep)) if keep else None
@@ -631,20 +646,34 @@ def _join_condition(path: tuple[JoinStep, ...]) -> exp.Expression:
     )
 
 
+def _dim_alias(step: JoinStep) -> str:
+    """집계 서브쿼리 안에서 자식의 차원에 붙일 별칭."""
+    return f"dim_{step.to_table.lower()}"
+
+
 def _aggregate_subquery(
     child: str,
     step: JoinStep,
     fields: list[LogicalField],
     graph: SchemaGraph,
     *,
-    predicates: list[exp.Expression] | None = None,
+    predicates: list[tuple[exp.Expression, LogicalField]] | None = None,
 ) -> exp.Select:
     """Group a child table by its foreign key before it is ever joined.
 
     This is the grain guard. The subquery yields at most one row per parent key,
     so the join that follows cannot change the parent's row count.
     """
-    group_columns = [exp.Column(this=_ident(c)) for c in step.to_columns]
+    # 자식의 차원을 조인해야 하면 자식에 별칭을 주고 모든 참조를 한정한다.
+    # 한정하지 않으면 자식과 차원이 같은 이름의 컬럼을 가질 때 (조인 키가 바로
+    # 그렇다) 데이터베이스가 "Ambiguous column name" 으로 거절한다.
+    needs_dim = any(len(f.source.path) > 1 for _, f in (predicates or []))
+    src = _CHILD_ALIAS if needs_dim else None
+    col = (
+        (lambda name: _column(src, name)) if src else (lambda name: exp.Column(this=_ident(name)))
+    )
+
+    group_columns = [col(c) for c in step.to_columns]
     projections: list[exp.Expression] = list(group_columns)
 
     for field in fields:
@@ -652,13 +681,13 @@ def _aggregate_subquery(
         if source.aggregate == "count":
             call: exp.Expression = exp.Count(this=exp.Star())
         elif source.aggregate == "sum":
-            call = exp.Sum(this=exp.Column(this=_ident(source.column)))
+            call = exp.Sum(this=col(source.column))
         elif source.aggregate == "avg":
-            call = exp.Avg(this=exp.Column(this=_ident(source.column)))
+            call = exp.Avg(this=col(source.column))
         elif source.aggregate == "max":
-            call = exp.Max(this=exp.Column(this=_ident(source.column)))
+            call = exp.Max(this=col(source.column))
         elif source.aggregate == "min":
-            call = exp.Min(this=exp.Column(this=_ident(source.column)))
+            call = exp.Min(this=col(source.column))
         else:
             raise ExpansionError(
                 f"unsupported aggregate '{source.aggregate}' on field '{field.name}'"
@@ -668,11 +697,41 @@ def _aggregate_subquery(
     if graph.schema.table(child) is None:
         raise ExpansionError(f"child table '{child}' is not in the schema")
 
-    select = exp.select(*projections).from_(_physical(child, graph))
+    base = _physical(child, graph)
+    select = exp.select(*projections).from_(
+        exp.alias_(base, src, table=True) if src else base
+    )
+
     if predicates:
+        # 조건이 자식이 아니라 자식의 차원에 걸리면 여기서 그 차원을 조인한다.
+        # "매출액 계정만 합계" 는 ``F_PL`` 이 아니라 ``D_PL_ACCT`` 의 이야기이고,
+        # 그 조인이 없으면 조건을 걸 자리가 없다. 차원은 N:1 이므로 자식의 행
+        # 수가 늘지 않는다 — 집계 결과도 그대로다.
+        joined: set[str] = set()
+        for _, field in predicates:
+            if len(field.source.path) < 2:
+                continue
+            dim_step = field.source.path[1]
+            alias = _dim_alias(dim_step)
+            if alias in joined:
+                continue
+            joined.add(alias)
+            select = select.join(
+                exp.alias_(_physical(dim_step.to_table, graph), alias, table=True),
+                on=_conjunction(
+                    [
+                        exp.EQ(this=col(left), expression=_column(alias, right))
+                        for left, right in zip(
+                            dim_step.from_columns, dim_step.to_columns, strict=True
+                        )
+                    ]
+                ),
+                join_type="INNER",
+            )
         # 밀어넣은 조건은 GROUP BY 앞에 걸린다. 집계가 조건에 걸린 행만 보게
         # 되고, 그래야 "이번 달 매출"이 실제로 이번 달만 더한다.
-        select = select.where(_conjunction(list(predicates)))
+        select = select.where(_conjunction([p for p, _ in predicates]))
+
     return select.group_by(*group_columns)
 
 

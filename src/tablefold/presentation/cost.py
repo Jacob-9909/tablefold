@@ -147,8 +147,42 @@ def estimate_fields(
             total += 1 + len(measures) * len(NUMERIC_AGGREGATES)
             if expose_child_filters:
                 total += len(filterable_columns(child_table, graph, step, measures))
+                total += sum(
+                    len(cols) for _, cols in child_dimension_filters(child_table, graph)
+                )
 
     return min(total, cap)
+
+
+# 집계된 자식의 차원 하나에서 조건으로 노출할 컬럼 상한.
+#
+# 자식마다 차원이 여럿이고 차원마다 컬럼이 여럿이라 그냥 두면 곱으로 늘어난다.
+# 조건에 실제로 쓰이는 것은 이름표 몇 개뿐이므로 앞쪽만 취한다.
+MAX_CHILD_DIMENSION_FILTERS = 4
+
+
+def child_dimension_filters(
+    child: PhysicalTable, graph: SchemaGraph
+) -> tuple[tuple[str, tuple[PhysicalColumn, ...]], ...]:
+    """집계된 자식이 참조하는 차원과, 그 차원에서 조건으로 쓸 컬럼들.
+
+    ``D_FI_ORG`` 를 앵커로 삼으면 ``F_PL`` 이 사전집계로 붙는다. 그런데 "매출액
+    계정만" 같은 조건은 ``F_PL`` 자신이 아니라 ``F_PL`` 이 가리키는
+    ``D_PL_ACCT.PL_ACCT2_NM`` 에 걸린다. 그 통로가 없으면 재무 주제의 질문이
+    통째로 답이 안 된다 — 골드셋 FI_0001 이 정확히 여기서 실패했다.
+
+    한 홉만 따라간다. 두 홉을 더 가면 집계 서브쿼리 안의 조인이 깊어지는데,
+    조건에 그만큼 먼 컬럼이 쓰이는 경우가 드물다.
+    """
+    found: list[tuple[str, tuple[PhysicalColumn, ...]]] = []
+    for fk in graph.outgoing(child.name):
+        dim = graph.schema.table(fk.to_table)
+        if dim is None or dim.name.lower() == child.name.lower():
+            continue
+        columns = promotable_columns(dim, graph, drop_primary_key=True)
+        if columns:
+            found.append((dim.name, columns[:MAX_CHILD_DIMENSION_FILTERS]))
+    return tuple(found)
 
 
 def filterable_columns(

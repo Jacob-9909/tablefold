@@ -30,6 +30,7 @@ from tablefold.presentation.cost import (
     MAX_MODEL_FIELDS,
     NUMERIC_AGGREGATES,
     aggregatable_columns,
+    child_dimension_filters,
     filterable_columns,
     promotable_columns,
 )
@@ -293,7 +294,7 @@ def _filter_fields(
     """
     # 어느 컬럼이 필터가 되는지의 규칙은 ``cost`` 에 한 벌만 둔다. 선택 단계가
     # 후보 가격을 매길 때 같은 규칙을 읽어야 추정과 실제가 어긋나지 않는다.
-    return [
+    fields = [
         LogicalField(
             name=f"{prefix}_{column.name}",
             type=column.type,
@@ -308,6 +309,46 @@ def _filter_fields(
         )
         for column in filterable_columns(table, graph, step, measures)
     ]
+
+    # 조건이 자식 자신이 아니라 자식이 가리키는 차원에 걸리는 경우가 있다.
+    # "매출액 계정만" 은 ``F_PL`` 이 아니라 ``D_PL_ACCT.PL_ACCT2_NM`` 의 이야기다.
+    # 경로를 두 단으로 두면 ``expand`` 가 집계 서브쿼리 안에서 그 차원까지 조인해
+    # 조건을 건다.
+    for dim_name, columns in child_dimension_filters(table, graph):
+        dim_step = next(
+            (
+                JoinStep(
+                    from_table=table.name,
+                    from_columns=fk.from_columns,
+                    to_table=fk.to_table,
+                    to_columns=fk.to_columns,
+                    cardinality=Cardinality.MANY_TO_ONE,
+                )
+                for fk in graph.outgoing(table.name)
+                if fk.to_table.lower() == dim_name.lower()
+            ),
+            None,
+        )
+        if dim_step is None:
+            continue
+        fields.extend(
+            LogicalField(
+                name=f"{prefix}_{column.name}",
+                type=column.type,
+                source=FieldSource(
+                    kind=FieldKind.AGGREGATED,
+                    table=dim_name,
+                    column=column.name,
+                    path=(step, dim_step),
+                ),
+                description=(
+                    f"Filters the {table.name} rows by {dim_name}.{column.name}."
+                ),
+                filter_only=True,
+            )
+            for column in columns
+        )
+    return fields
 
 
 # ── budget and naming ─────────────────────────────────────────────────────────

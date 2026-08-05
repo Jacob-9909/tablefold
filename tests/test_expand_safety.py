@@ -710,3 +710,130 @@ def test_pruning_is_off_by_default(retail_schema):
     )
 
     assert [m.base_table for m in result.layer.models] == names
+
+
+# ── 집계된 자식의 차원에 조건 걸기 ────────────────────────────────────────────
+
+
+def _org_pl_acct_schema():
+    """조직 → 손익 → 계정. 조건이 손익이 아니라 계정에 걸리는 모양."""
+    org = PhysicalTable(
+        name="orgs",
+        columns=(
+            PhysicalColumn("org_cd", "varchar", nullable=False),
+            PhysicalColumn("head_nm", "varchar"),
+        ),
+        primary_key=("org_cd",),
+    )
+    acct = PhysicalTable(
+        name="accounts",
+        columns=(
+            PhysicalColumn("acct_cd", "varchar", nullable=False),
+            PhysicalColumn("acct_nm", "varchar"),
+        ),
+        primary_key=("acct_cd",),
+    )
+    pl = PhysicalTable(
+        name="pl_lines",
+        columns=(
+            PhysicalColumn("id", "bigint", nullable=False),
+            PhysicalColumn("org_cd", "varchar"),
+            PhysicalColumn("acct_cd", "varchar"),
+            PhysicalColumn("amount", "numeric"),
+        ),
+        primary_key=("id",),
+    )
+    return PhysicalSchema(
+        tables=(org, acct, pl),
+        foreign_keys=(
+            ForeignKey("pl_lines", ("org_cd",), "orgs", ("org_cd",)),
+            ForeignKey("pl_lines", ("acct_cd",), "accounts", ("acct_cd",)),
+        ),
+    )
+
+
+def _org_anchored():
+    from tablefold.clustering.select import ExplicitSelector
+
+    return fold(
+        _org_pl_acct_schema(),
+        infer_missing_keys=False,
+        selector=ExplicitSelector(("orgs",)),
+        policy=SelectionPolicy(max_areas=1),
+        include_aggregates=True,
+        expose_child_filters=True,
+        field_budget=10_000,
+        max_hops=2,
+    )
+
+
+def test_a_childs_dimension_becomes_a_filter():
+    """"매출액 계정만 합계" 는 자식이 아니라 자식이 가리키는 차원의 이야기다.
+
+    통로가 없으면 재무 주제의 질문이 통째로 답이 안 된다 — 골드셋 FI_0001 이
+    정확히 여기서 실패했다.
+    """
+    result = _org_anchored()
+    orgs = result.layer.model("orgs")
+
+    two_step = [
+        f for f in orgs.fields if f.filter_only and len(f.source.path) == 2
+    ]
+
+    assert any(f.source.table == "accounts" for f in two_step)
+
+
+def test_filtering_on_a_childs_dimension_joins_inside_the_subquery():
+    """조건을 걸려면 집계 서브쿼리 *안* 에서 그 차원까지 조인해야 한다."""
+    result = _org_anchored()
+    orgs = result.layer.model("orgs")
+    acct = next(
+        f for f in orgs.fields if f.filter_only and f.source.table == "accounts"
+    )
+    total = next(f for f in orgs.fields if f.source.aggregate == "sum")
+
+    sql = expand(
+        f"SELECT head_nm, SUM({total.name}) AS t FROM orgs "
+        f"WHERE {acct.name} = 'sales' GROUP BY head_nm",
+        result.layer,
+        result.graph,
+    ).sql
+
+    body = sql.split("SELECT\n  head_nm")[0]
+    assert "accounts" in body
+    assert "acct_nm = 'sales'" in body.replace('"', "")
+
+
+def test_the_child_is_aliased_when_a_dimension_is_joined():
+    """자식과 차원이 같은 이름의 컬럼을 가지면 — 조인 키가 바로 그렇다 —
+    한정하지 않은 참조를 데이터베이스가 "Ambiguous column name" 으로 거절한다."""
+    result = _org_anchored()
+    orgs = result.layer.model("orgs")
+    acct = next(
+        f for f in orgs.fields if f.filter_only and f.source.table == "accounts"
+    )
+    total = next(f for f in orgs.fields if f.source.aggregate == "sum")
+
+    sql = expand(
+        f"SELECT SUM({total.name}) AS t FROM orgs WHERE {acct.name} = 'sales'",
+        result.layer,
+        result.graph,
+    ).sql
+
+    assert "AS src" in sql
+    assert "src.acct_cd = " in sql.replace('"', "")
+
+
+def test_an_unfiltered_child_needs_no_alias():
+    """조건이 없으면 조인도 없고, 별칭으로 읽기 어렵게 만들 이유도 없다."""
+    result = _org_anchored()
+    total = next(
+        f for f in result.layer.model("orgs").fields if f.source.aggregate == "sum"
+    )
+
+    sql = expand(
+        f"SELECT SUM({total.name}) AS t FROM orgs", result.layer, result.graph
+    ).sql
+
+    assert "AS src" not in sql
+    assert "accounts" not in sql

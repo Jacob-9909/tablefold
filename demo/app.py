@@ -134,14 +134,18 @@ def _load_source(req: FoldRequest | ExpandRequest):
             "include_aggregates": aggregates,
             "expose_child_filters": filters,
             "prefix_joined_fields": False,
-            "max_hops": 1,
+            "max_hops": 2,
         }
         if anchors:
             # 앵커를 이름으로 지목했으면 개수 상한은 그 개수다. 화면의 기본값 6이
             # 19개를 지목한 요청을 조용히 6개로 자르면, 답변가능률이 100%에서
             # 13.5%로 떨어지는데 화면에는 아무 설명도 남지 않는다.
             options["max_areas"] = len(anchors)
-            options["field_budget"] = 10_000
+            options["field_budget"] = 100_000
+            # 모델당 상한이 진짜 병목이었다. 64 로 두면 D_FI_ORG 처럼 12개 표를
+            # 안는 모델에서 F_PL 이 통째로 잘려 나가고, 재무 주제의 질문이 답이
+            # 안 된다. 주제표 9개 기준으로 64→4개, 120→6개, 200→7개가 풀린다.
+            options["max_model_fields"] = 200
         return schema, options, meta
 
     if not req.ddl.strip():
@@ -186,6 +190,7 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
 
         max_areas = fold_options.pop("max_areas", req.max_areas)
         field_budget = fold_options.pop("field_budget", req.field_budget)
+        model_cap = fold_options.pop("max_model_fields", MAX_MODEL_FIELDS)
         policy = SelectionPolicy(
             coverage_target=req.coverage,
             min_gain=req.min_gain,
@@ -202,6 +207,7 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
             enriched_schema,
             policy=policy,
             field_budget=field_budget,
+            max_model_fields=model_cap,
             **fold_options,
         )
 
@@ -383,14 +389,20 @@ def run_expand(req: ExpandRequest) -> dict[str, Any]:
         schema, fold_options, _ = _load_source(req)
         max_areas = fold_options.pop("max_areas", req.max_areas)
         field_budget = fold_options.pop("field_budget", req.field_budget)
+        model_cap = fold_options.pop("max_model_fields", MAX_MODEL_FIELDS)
         policy = SelectionPolicy(
             coverage_target=req.coverage,
             min_gain=req.min_gain,
             max_fields_per_table=req.max_cost,
             max_areas=max_areas,
         )
+        model_cap = fold_options.pop("max_model_fields", MAX_MODEL_FIELDS)
         result = fold(
-            schema, policy=policy, field_budget=field_budget, **fold_options
+            schema,
+            policy=policy,
+            field_budget=field_budget,
+            max_model_fields=model_cap,
+            **fold_options,
         )
 
         expansion = expand(req.sql, result.layer, result.graph)

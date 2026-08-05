@@ -12,7 +12,7 @@ from tablefold.clustering.cluster import Clustering, cluster
 from tablefold.clustering.select import SelectionPolicy, Selector
 from tablefold.composition.compose import ComposeOptions, compose
 from tablefold.graph.graph import SchemaGraph, infer_foreign_keys
-from tablefold.presentation.cost import DEFAULT_FIELD_BUDGET
+from tablefold.presentation.cost import DEFAULT_FIELD_BUDGET, MAX_MODEL_FIELDS
 from tablefold.schema.ir import LogicalLayer, PhysicalSchema
 from tablefold.scoring.classify import TableProfile, profile_tables
 
@@ -48,6 +48,7 @@ def fold(
     selector: Selector | None = None,
     max_hops: int = 3,
     field_budget: int = DEFAULT_FIELD_BUDGET,
+    max_model_fields: int = MAX_MODEL_FIELDS,
     infer_missing_keys: bool = True,
     include_aggregates: bool = True,
     prefix_joined_fields: bool = True,
@@ -81,6 +82,7 @@ def fold(
         policy=policy,
         selector=selector,
         max_hops=max_hops,
+        max_fields=max_model_fields,
         include_aggregates=include_aggregates,
         expose_child_filters=expose_child_filters,
     )
@@ -90,6 +92,7 @@ def fold(
         options=ComposeOptions(
             max_hops=max_hops,
             field_budget=field_budget,
+            max_model_fields=max_model_fields,
             include_aggregates=include_aggregates,
             prefix_joined_fields=prefix_joined_fields,
             expose_child_filters=expose_child_filters,
