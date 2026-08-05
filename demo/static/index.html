@@ -3,312 +3,305 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>tablefold — Schema Engineering Dashboard</title>
+  <title>tablefold — 복잡한 DB를 AI가 읽을 수 있게</title>
   <link rel="stylesheet" href="style.css">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
-<body class="dark-theme">
+<body>
 
-<!-- Top Bar Header -->
 <header class="topbar">
   <div class="wrap topbar-inner">
-    <div class="brand">
-      <span class="logo">tablefold</span>
-      <span class="badge">Schema Engineering Engine</span>
-    </div>
-    <div class="topbar-controls">
-      <div class="control-group">
-        <label for="sourceSelect">Source:</label>
-        <select id="sourceSelect" class="select-sm">
-          <option value="ddl">Retail 50 (Sample DDL)</option>
-          <option value="live">Live Database Connection</option>
-        </select>
-      </div>
-      <div class="control-group" id="anchorModeGroup">
-        <label for="anchorSelect">Anchor Mode:</label>
-        <select id="anchorSelect" class="select-sm">
-          <option value="auto">Auto (Greedy Set Cover)</option>
-          <option value="fact">Fact Tables First</option>
-          <option value="dim">Dimension Tables First</option>
-          <option value="mixed">Mixed (Facts + Dims)</option>
-        </select>
-      </div>
-      <button id="openDdlBtn" class="btn btn-secondary btn-sm">Edit DDL</button>
-      <button id="openConfigBtn" class="btn btn-secondary btn-sm">Options</button>
-      <button id="runFoldBtn" class="btn btn-primary btn-sm">Run Pipeline</button>
-    </div>
+    <div class="wordmark">tablefold</div>
+    <p class="tagline">테이블이 많아 AI가 헤매는 데이터베이스를, 몇 개의 넓은 표로 묶어 줍니다.</p>
   </div>
 </header>
 
-<main class="wrap main-container">
+<main class="wrap">
 
-  <!-- ────────── 1. BEFORE & AFTER HEADLINE METRICS ────────── -->
-  <section class="card headline-card">
-    <div class="ba-container">
-      <div class="ba-side">
-        <div class="ba-label">Before Fold (Physical Joins)</div>
-        <div class="ba-num highlight-red" id="beforeJoins">-</div>
-        <div class="ba-note">LLM이 직접 추론해야 하는 조인 횟수</div>
+  <!-- ────────── 1. 결과 요약 ────────── -->
+  <section class="step">
+    <div class="step-head">
+      <span class="step-num">1</span>
+      <div>
+        <h2>무엇이 달라졌나</h2>
+        <p class="step-sub">AI에게 이 데이터베이스를 설명할 때 들어가는 내용입니다.</p>
       </div>
+    </div>
 
-      <div class="ba-arrow">➔</div>
+    <div class="headline card">
+      <div class="headline-empty" id="headlineEmpty">데이터베이스를 읽는 중입니다…</div>
 
-      <div class="ba-side ba-after">
-        <div class="ba-label">After Fold (Wide Single Table)</div>
-        <div class="ba-num highlight-green">0</div>
-        <div class="ba-note">조인 없이 한 줄에 인라인/선집계 완료</div>
+      <div class="headline-body" id="headlineBody" hidden>
+        <div class="ba">
+          <div class="ba-side">
+            <div class="ba-label">AI가 직접 이어붙여야 하는 표</div>
+            <div class="ba-num" id="beforeJoins">–</div>
+            <div class="ba-unit">번</div>
+            <div class="ba-note">조인 — 여기서 대부분 틀립니다</div>
+          </div>
+
+          <div class="ba-arrow" aria-hidden="true">→</div>
+
+          <div class="ba-side ba-after">
+            <div class="ba-label">묶은 뒤</div>
+            <div class="ba-num">0</div>
+            <div class="ba-unit">번</div>
+            <div class="ba-note">이미 한 줄에 붙어 있습니다</div>
+          </div>
+
+          <div class="ba-gain">
+            <div class="ba-gain-num" id="sizeDelta">–</div>
+            <div class="ba-gain-label" id="sizeLabel">설명 길이</div>
+          </div>
+        </div>
+
+        <p class="headline-plain" id="headlinePlain"></p>
       </div>
+    </div>
 
-      <div class="ba-gain">
-        <div class="ba-gain-num highlight-cyan" id="sizeDelta">-</div>
-        <div class="ba-gain-label">Prompt Size Reduction vs DDL</div>
+    <div class="facts" id="factsRow" hidden>
+      <div class="fact">
+        <div class="fact-num" id="factModels">–</div>
+        <div class="fact-label">묶인 모델</div>
+        <div class="fact-help">AI가 이 표들만 보고 질문에 답합니다</div>
+      </div>
+      <div class="fact">
+        <div class="fact-num" id="factCovered">–</div>
+        <div class="fact-label">묶인 테이블</div>
+        <div class="fact-help" id="factCoveredHelp">전체 중 얼마나 포함됐는지</div>
+      </div>
+      <div class="fact">
+        <div class="fact-num" id="factEdge">–</div>
+        <div class="fact-label">따로 남은 테이블</div>
+        <div class="fact-help">드물게 필요할 때만 꺼내 씁니다</div>
+      </div>
+      <div class="fact">
+        <div class="fact-num" id="factLinks">–</div>
+        <div class="fact-label">되찾은 연결</div>
+        <div class="fact-help">DDL에 안 적혀 있던 테이블 간 관계</div>
       </div>
     </div>
   </section>
 
-  <!-- Summary Facts Row -->
-  <section class="metrics-bar">
-    <div class="metric-card">
-      <span class="metric-label">Tier-1 Composed Models</span>
-      <span class="metric-value highlight-blue" id="factModels">-</span>
-      <span class="metric-sub" id="factCovered">- tables covered</span>
+  <!-- ────────── 2. 묶인 결과 ────────── -->
+  <section class="step">
+    <div class="step-head">
+      <span class="step-num">2</span>
+      <div>
+        <h2>어떻게 묶였나</h2>
+        <p class="step-sub">
+          모델 하나는 넓은 표 한 장입니다. 표 하나에 필요한 내용이 이미 다 붙어 있어,
+          AI가 표를 이어 붙이는 작업을 하지 않아도 됩니다. 카드를 누르면 안에 든 항목을 볼 수 있습니다.
+        </p>
+      </div>
     </div>
-    <div class="metric-card">
-      <span class="metric-label">Inferred Foreign Keys</span>
-      <span class="metric-value highlight-cyan" id="factLinks">-</span>
-      <span class="metric-sub" id="mDeclaredFks">- declared in DDL</span>
+
+    <div id="modelList" class="model-list">
+      <div class="empty">아직 결과가 없습니다.</div>
     </div>
-    <div class="metric-card">
-      <span class="metric-label">Tier-2 Edge Tables</span>
-      <span class="metric-value highlight-amber" id="factEdge">-</span>
-      <span class="metric-sub">On-demand fallback</span>
+
+    <details class="leftover" id="leftoverBox" hidden>
+      <summary>
+        <span id="leftoverCount">0개</span> 테이블은 어느 모델에도 묶이지 않았습니다
+      </summary>
+      <p class="leftover-note">
+        묶어 봐야 이득보다 설명 비용이 큰 테이블들입니다. 사라진 게 아니라, 그 테이블이 필요한 질문이
+        들어올 때만 따로 꺼내 씁니다.
+      </p>
+      <div class="chips" id="leftoverChips"></div>
+    </details>
+  </section>
+
+  <!-- ────────── 3. 왜 이렇게 묶였나 ────────── -->
+  <section class="step">
+    <div class="step-head">
+      <span class="step-num">3</span>
+      <div>
+        <h2>왜 이렇게 묶였나</h2>
+        <p class="step-sub">
+          가운데가 기준이 되는 표이고, 주위 표들이 그 한 줄에 붙습니다.
+          실선은 그대로 붙은 것, 점선 Σ는 여러 줄을 미리 합계 낸 것입니다.
+        </p>
+      </div>
     </div>
-    <div class="metric-card">
-      <span class="metric-label">Prompt Token Size</span>
-      <span class="metric-value highlight-green" id="mPromptSize">-</span>
-      <span class="metric-sub" id="mSizeReduction">- vs physical DDL</span>
+
+    <div class="card">
+      <div id="lineageTabs" class="lineage-tabs"></div>
+      <p id="lineageCaption" class="lineage-caption"></p>
+      <div id="lineageChart" class="lineage-chart"></div>
+      <div id="lineageDetail" class="lineage-detail"></div>
+    </div>
+
+    <div class="card" id="fidelityPanel"></div>
+  </section>
+
+  <!-- ────────── 4. 써보기 ────────── -->
+  <section class="step">
+    <div class="step-head">
+      <span class="step-num">4</span>
+      <div>
+        <h2>실제로 돌려보기</h2>
+        <p class="step-sub">
+          왼쪽은 AI가 넓은 표만 보고 쓴 간단한 SQL입니다. 오른쪽은 그걸 실제 데이터베이스가
+          이해하는 SQL로 바꾼 결과입니다. 사람이 조인을 직접 쓰지 않아도 됩니다.
+        </p>
+      </div>
+    </div>
+
+    <div class="card try">
+      <div class="try-col">
+        <div class="try-head">
+          <h3>AI가 쓴 SQL</h3>
+          <span class="try-tag">조인 없음</span>
+        </div>
+        <textarea id="logicalSql" rows="5" spellcheck="false"></textarea>
+
+        <div class="presets">
+          <span class="presets-label">예시:</span>
+        </div>
+
+        <button id="runExpand" class="btn btn-primary">바꿔보기</button>
+      </div>
+
+      <div class="try-col">
+        <div class="try-head">
+          <h3>실제로 실행되는 SQL</h3>
+          <button id="copySql" class="link-btn">복사</button>
+        </div>
+        <p class="try-stat" id="expandStat" hidden></p>
+        <pre id="expandedSql" class="code">바꿔보기를 누르면 여기에 결과가 나옵니다.</pre>
+      </div>
     </div>
   </section>
 
-  <!-- ────────── 2. PIPELINE CATEGORY STEP TABS ────────── -->
-  <nav class="pipeline-tabs" id="pipelineNav">
-    <button class="tab-btn active" data-tab="tab-1">
-      <span class="tab-step">STEP 1</span>
-      <span class="tab-title">Introspection & Recovery</span>
-    </button>
-    <button class="tab-btn" data-tab="tab-2">
-      <span class="tab-step">STEP 2</span>
-      <span class="tab-title">Factness & Lattice Selection</span>
-    </button>
-    <button class="tab-btn" data-tab="tab-3">
-      <span class="tab-step">STEP 3</span>
-      <span class="tab-title">Wide Models & ERD Lineage</span>
-    </button>
-    <button class="tab-btn" data-tab="tab-4">
-      <span class="tab-step">STEP 4</span>
-      <span class="tab-title">SQL Expansion & Pruning</span>
-    </button>
-  </nav>
+  <!-- ────────── 접어둔 것들 ────────── -->
+  <section class="step">
+    <details class="advanced">
+      <summary><h2>설정과 자세한 분석</h2><span class="hint">개발자용</span></summary>
 
-  <!-- Tab Content Containers -->
-  <div class="tab-content-container">
+      <div class="adv-body">
 
-    <!-- STEP 1: Introspection & Recovery -->
-    <section id="tab-1" class="tab-pane active">
-      <div class="pane-header">
-        <h2>Physical Catalog & Recovered Foreign Keys</h2>
-        <p class="pane-desc">물리 스키마 DDL 파싱 결과 및 컬럼명 규칙·타입 매칭을 통해 되찾은 암묵적 외래키 목록입니다.</p>
-      </div>
+        <div class="adv-block">
+          <h3>스키마 가져올 곳</h3>
+          <p class="adv-note" id="sourceNote">연결된 데이터베이스의 카탈로그를 직접 읽습니다.</p>
+          <div class="knobs">
+            <label class="knob">
+              <span class="knob-name">소스</span>
+              <select id="sourceSelect">
+                <option value="live">데이터베이스 연결 (확인 중…)</option>
+                <option value="ddl">예제 DDL (retail 53테이블)</option>
+              </select>
+              <small>기본은 연결된 데이터베이스입니다. 연결이 없으면 예제로 넘어갑니다.</small>
+            </label>
 
-      <div class="grid-2col">
-        <div class="card">
-          <h3>Inferred Foreign Keys (<span id="inferredFkCount">0</span>)</h3>
+            <label class="knob" id="anchorKnob">
+              <span class="knob-name">무엇을 중심으로 묶을까</span>
+              <select id="anchorSelect">
+                <option value="mixed">둘 다 — 못 묻는 질문이 없어집니다</option>
+                <option value="fact">거래 기록 중심 — 설명이 가장 짧습니다</option>
+                <option value="dim">기준 정보 중심 — 여러 기록을 나란히</option>
+              </select>
+              <small>
+                거래 기준: 매출 1건이 한 줄. 기준 정보 기준: 조직 1개가 한 줄이고
+                매출·계획·재고가 미리 합쳐져 붙습니다. 둘 다: 설명은 길어지지만 사각지대가 없습니다.
+              </small>
+            </label>
+          </div>
+        </div>
+
+        <div class="adv-block">
+          <h3>설정</h3>
+          <p class="adv-note">바꾼 뒤 <b>다시 묶기</b>를 누르면 위 결과가 갱신됩니다.</p>
+
+          <div class="knobs">
+            <label class="knob">
+              <span class="knob-name">모델 개수 상한</span>
+              <input type="number" id="maxAreas" min="1" max="40" value="6">
+              <small>이보다 많이 만들지 않습니다. 데이터베이스 소스에서는 자동으로 정해집니다.</small>
+            </label>
+
+            <label class="knob">
+              <span class="knob-name">전체 필드 예산</span>
+              <input type="number" id="fieldBudget" min="20" max="10000" step="10" value="200">
+              <small>모든 모델이 나눠 쓰는 총 항목 수. 줄이면 설명이 짧아지고 내용도 줄어듭니다.</small>
+            </label>
+
+            <label class="knob">
+              <span class="knob-name">새 모델의 최소 이득</span>
+              <input type="number" id="minGain" min="1" max="10" value="2">
+              <small>새 모델이 최소 몇 개의 테이블을 새로 데려와야 만들 가치가 있는지.</small>
+            </label>
+
+            <label class="knob">
+              <span class="knob-name">테이블당 항목 한도</span>
+              <input type="number" id="maxCost" min="1" max="50" step="1" value="10">
+              <small>테이블 하나를 새로 품는 데 이보다 많은 항목이 들면 만들지 않습니다.</small>
+            </label>
+
+            <label class="knob">
+              <span class="knob-name">목표 커버리지</span>
+              <input type="number" id="coverage" min="0.5" max="1" step="0.05" value="0.9">
+              <small>전체 테이블 중 이만큼 담는 것이 목표. 위 두 한도에 먼저 걸리면 못 채웁니다.</small>
+            </label>
+          </div>
+
+          <div class="ddl-block" id="ddlBlock" hidden>
+            <label class="knob-name" for="ddlInput">데이터베이스 정의(DDL)</label>
+            <textarea id="ddlInput" rows="6" spellcheck="false" placeholder="CREATE TABLE ..."></textarea>
+          </div>
+
+          <div class="adv-actions">
+            <button id="loadSample" class="btn btn-ghost">예제 다시 불러오기</button>
+            <button id="runFold" class="btn btn-primary">다시 묶기</button>
+          </div>
+        </div>
+
+        <div class="adv-block">
+          <h3>AI에게 전달되는 전체 텍스트</h3>
+          <p class="adv-note">이 글이 그대로 프롬프트에 들어갑니다.</p>
+          <pre id="promptText" class="code code-tall">아직 결과가 없습니다.</pre>
+        </div>
+
+        <div class="adv-block">
+          <h3>되찾은 테이블 연결</h3>
+          <p class="adv-note">
+            외래 키가 선언돼 있지 않아도, 기본 키와 실제 데이터로 관계를 되살립니다.
+          </p>
           <div class="table-scroll">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>From Table</th>
-                  <th>Column</th>
-                  <th>To Table</th>
-                  <th>Target PK</th>
-                  <th>Confidence</th>
-                </tr>
-              </thead>
-              <tbody id="tblInferredFks">
-                <tr><td colspan="5" class="empty-cell">No inferred foreign keys.</td></tr>
-              </tbody>
+            <table class="data">
+              <thead><tr><th>어느 테이블의</th><th>어느 컬럼이</th><th>어디를 가리키는지</th><th>확신도</th></tr></thead>
+              <tbody id="fkBody"><tr><td colspan="4" class="empty">아직 결과가 없습니다.</td></tr></tbody>
             </table>
           </div>
         </div>
 
-        <div class="card">
-          <h3>Physical Tables Catalog</h3>
+        <div class="adv-block">
+          <h3>테이블별 분석</h3>
+          <p class="adv-note">
+            어떤 테이블이 모델의 중심이 될 만한지 점수로 나타낸 값입니다. 숫자가 클수록 사건 기록에
+            가깝고(매출·주문), 작을수록 이름표에 가깝습니다(조직·품목).
+          </p>
           <div class="table-scroll">
-            <table class="data-table">
+            <table class="data">
               <thead>
-                <tr>
-                  <th>Table</th>
-                  <th>PK</th>
-                  <th>Cols</th>
-                  <th>Role</th>
-                  <th>Rows</th>
-                  <th>Tier</th>
-                </tr>
+                <tr><th>테이블</th><th>상태</th><th>중심 점수</th><th>컬럼</th><th>참조됨</th><th>참조함</th></tr>
               </thead>
-              <tbody id="tblPhysicalCatalog">
-                <tr><td colspan="6" class="empty-cell">Loading catalog...</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- STEP 2: Factness & Lattice Selection -->
-    <section id="tab-2" class="tab-pane">
-      <div class="pane-header">
-        <h2>Factness Scoring & Greedy Lattice Selection</h2>
-        <p class="pane-desc">테이블별 Fact/Dimension 특성 점수 산출 및 최소 모델 수로 90%+ 스키마 커버리지를 얻는 앵커 선정 과정입니다.</p>
-      </div>
-
-      <div class="grid-2col">
-        <div class="card">
-          <h3>Table Profiles & Fact Scores</h3>
-          <div class="table-scroll">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Table</th>
-                  <th>Role</th>
-                  <th>Fact Score</th>
-                  <th>Numeric %</th>
-                  <th>Temporal</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody id="tblFactness">
-                <tr><td colspan="6" class="empty-cell">Loading profiles...</td></tr>
-              </tbody>
+              <tbody id="tableBody"><tr><td colspan="6" class="empty">아직 결과가 없습니다.</td></tr></tbody>
             </table>
           </div>
         </div>
 
-        <div class="card">
-          <h3>Candidate Lattice Analysis</h3>
-          <p class="card-sub">후보 앵커별 Reachable Coverage 및 필드 소비 비용</p>
-          <div class="table-scroll">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Candidate Anchor</th>
-                  <th>Role</th>
-                  <th>Score</th>
-                  <th>Reach Tables</th>
-                  <th>Est. Fields</th>
-                </tr>
-              </thead>
-              <tbody id="tblLattice">
-                <tr><td colspan="5" class="empty-cell">Loading lattice...</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
       </div>
-    </section>
+    </details>
+  </section>
 
-    <!-- STEP 3: Wide Models & ERD Lineage -->
-    <section id="tab-3" class="tab-pane">
-      <div class="pane-header">
-        <h2>Composed Wide Logical Models & Interactive Lineage ERD</h2>
-        <p class="pane-desc">앵커 중심 N:1 인라인 평탄화 & 1:N 자식 선집계가 적용된 와이드 모델 및 ERD 다이어그램입니다.</p>
-      </div>
-
-      <!-- Wide Models Grid -->
-      <div class="card">
-        <h3>Tier-1 Composed Wide Models (<span id="modelCount">0</span>)</h3>
-        <p class="card-sub">각 카드를 클릭하면 내부 필드 구성 및 인라인/선집계 세부 목록을 확인할 수 있습니다.</p>
-        <div id="modelList" class="model-list-grid">
-          <div class="empty-cell">No logical models.</div>
-        </div>
-
-        <!-- Tier-2 Leftover Edge Tables -->
-        <div class="leftover-box" id="leftoverBox">
-          <div class="leftover-head">
-            <span id="leftoverCount">0</span> Tier-2 Edge Tables (On-Demand Fallback)
-          </div>
-          <div class="chips" id="leftoverChips"></div>
-        </div>
-      </div>
-
-      <!-- Lineage Radial ERD Chart -->
-      <div class="card">
-        <h3>Interactive DB Schema Lineage Diagram</h3>
-        <p class="card-sub">앵커 모델별 방사형 연결 다이어그램 (실선: N:1 평탄화 필드, 점선 Σ: 1:N 선집계 필드)</p>
-        <div id="lineageTabs" class="lineage-tabs"></div>
-        <p id="lineageCaption" class="lineage-caption"></p>
-        <div id="lineageChart" class="lineage-chart"></div>
-        <div id="lineageDetail" class="lineage-detail"></div>
-      </div>
-
-      <!-- Fidelity Preservation Report -->
-      <div class="card" id="fidelityPanel"></div>
-    </section>
-
-    <!-- STEP 4: SQL Expansion & Pruning -->
-    <section id="tab-4" class="tab-pane">
-      <div class="pane-header">
-        <h2>Logical SQL Expansion & Join Pruning Engine</h2>
-        <p class="pane-desc">LLM이 작성한 논리 SQL을 물리 CTE SQL로 변환하고, 불필요한 조인을 프루닝(Pruning)합니다.</p>
-      </div>
-
-      <div class="grid-2col">
-        <div class="card">
-          <div class="card-head-flex">
-            <h3>LLM Logical SQL Input</h3>
-            <div class="presets-row">
-              <button class="chip-btn" data-sql="SELECT customer_tier_label, SUM(grand_total) AS revenue FROM orders GROUP BY 1">Tier Revenue</button>
-              <button class="chip-btn" data-sql="SELECT order_items_count, order_items_quantity_sum FROM orders">Item Counts</button>
-              <button class="chip-btn" data-sql="SELECT customer_email, grand_total FROM orders">Customer Email & Total</button>
-            </div>
-          </div>
-          <textarea id="logicalSqlInput" class="sql-input" rows="6" spellcheck="false">SELECT customer_tier_label, SUM(grand_total) AS revenue
-FROM orders
-GROUP BY 1</textarea>
-          <div class="pane-actions">
-            <button id="btnExpandSql" class="btn btn-primary">Expand to Physical SQL</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head-flex">
-            <h3>Physical Executable CTE SQL</h3>
-            <button id="copySqlBtn" class="btn btn-ghost btn-sm">Copy SQL</button>
-          </div>
-          <div id="expandStatsBadge" class="prune-stats-bar" hidden></div>
-          <pre id="physicalSqlOutput" class="code-block code-tall">Click Expand to generate physical SQL.</pre>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top: 20px;">
-        <div class="card-head-flex">
-          <h3>Full 2-Tier Serialized Prompt Text</h3>
-          <button id="copyPromptBtn" class="btn btn-ghost btn-sm">Copy Prompt</button>
-        </div>
-        <pre id="promptCodeView" class="code-block code-tall">Loading prompt text...</pre>
-      </div>
-    </section>
-
-  </div>
 </main>
 
-<!-- Model Details Bottom Sheet (Drawer) -->
+<!-- 모델 상세 -->
 <div id="sheet" class="sheet" hidden>
   <div class="sheet-panel" role="dialog" aria-modal="true">
     <div class="sheet-head">
       <div>
-        <h3 id="sheetName">Model Details</h3>
+        <h3 id="sheetName">모델</h3>
         <p id="sheetDesc" class="sheet-desc"></p>
       </div>
       <button id="sheetClose" class="icon-btn" aria-label="닫기">&times;</button>
@@ -317,64 +310,7 @@ GROUP BY 1</textarea>
   </div>
 </div>
 
-<!-- Modal: DDL Editor -->
-<div id="ddlModal" class="modal-backdrop" hidden>
-  <div class="modal-window">
-    <div class="modal-head">
-      <h3>Edit Physical DDL</h3>
-      <button class="close-modal-btn" data-modal="ddlModal">&times;</button>
-    </div>
-    <div class="modal-body">
-      <textarea id="ddlTextarea" class="code-input" rows="16" spellcheck="false" placeholder="CREATE TABLE ..."></textarea>
-    </div>
-    <div class="modal-foot">
-      <button id="resetSampleDdlBtn" class="btn btn-secondary">Reset Sample</button>
-      <button id="applyDdlBtn" class="btn btn-primary">Apply & Run</button>
-    </div>
-  </div>
-</div>
-
-<!-- Modal: Fold Options -->
-<div id="configModal" class="modal-backdrop" hidden>
-  <div class="modal-window">
-    <div class="modal-head">
-      <h3>Fold Pipeline Parameters</h3>
-      <button class="close-modal-btn" data-modal="configModal">&times;</button>
-    </div>
-    <div class="modal-body knobs-grid">
-      <div class="knob-field">
-        <label>Max Areas (Anchors)</label>
-        <input type="number" id="cfgMaxAreas" min="1" max="20" value="6">
-        <small>최대 합성 논리 모델 개수 상한</small>
-      </div>
-      <div class="knob-field">
-        <label>Field Budget</label>
-        <input type="number" id="cfgFieldBudget" min="20" max="1000" step="10" value="200">
-        <small>전체 레이어 필드 소비 한도</small>
-      </div>
-      <div class="knob-field">
-        <label>Min Gain</label>
-        <input type="number" id="cfgMinGain" min="1" max="10" value="2">
-        <small>모델 추가 시 최소 신규 테이블 확보 수</small>
-      </div>
-      <div class="knob-field">
-        <label>Max Cost per Table</label>
-        <input type="number" id="cfgMaxCost" min="1" max="50" step="1" value="10">
-        <small>신규 테이블 1개당 허용 필드 비용</small>
-      </div>
-      <div class="knob-field">
-        <label>Target Coverage</label>
-        <input type="number" id="cfgCoverage" min="0.5" max="1" step="0.05" value="0.9">
-        <small>목표 스키마 커버리지 비율 (0.9 = 90%)</small>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button id="applyConfigBtn" class="btn btn-primary">Save & Run</button>
-    </div>
-  </div>
-</div>
-
-<div id="toastNotification" class="toast" hidden></div>
+<div id="toast" class="toast" hidden></div>
 
 <script src="chart.js"></script>
 <script src="app.js"></script>
