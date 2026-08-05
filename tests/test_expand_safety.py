@@ -632,3 +632,81 @@ def test_reserved_words_are_quoted():
     assert '"user"' in sql
     assert '"order"' in sql
     assert '"select"' in sql
+
+
+# ── 앵커 목록의 낭비 ──────────────────────────────────────────────────────────
+
+
+def test_pruning_drops_anchors_that_buy_nothing(retail_schema):
+    """앵커가 사는 것은 테이블이 아니라 *조합* 이다.
+
+    팩트와 차원을 모두 앵커로 주면 대개 절반이 낭비다 — NL2SQL 에서 팩트 앵커
+    10개 중 5개는 답할 수 있는 질문을 하나도 늘리지 않았다. 빼도 답변가능률은
+    그대로여야 하고, 모델과 프롬프트만 줄어야 한다.
+    """
+    from tablefold.clustering.select import ExplicitSelector
+    from tablefold.presentation import emit
+    from tablefold.presentation import fidelity as fid
+
+    every = [t.name for t in retail_schema.tables]
+
+    def layer(prune):
+        result = fold(
+            retail_schema,
+            infer_missing_keys=False,
+            selector=ExplicitSelector(every, prune_redundant=prune),
+            policy=SelectionPolicy(max_areas=len(every)),
+            field_budget=10_000,
+            max_hops=1,
+        )
+        return result, fid.measure(result.layer, result.graph)
+
+    full, full_fid = layer(False)
+    lean, lean_fid = layer(True)
+
+    assert len(lean.layer.models) < len(full.layer.models)
+    assert lean_fid.pair_answerability == full_fid.pair_answerability
+    assert len(emit.render_text(lean.layer)) < len(emit.render_text(full.layer))
+
+
+def test_pruning_keeps_every_table_covered(retail_schema):
+    """이웃이 없는 테이블은 어떤 쌍에도 안 들어간다.
+
+    쌍만 보고 빼면 그런 테이블을 유일하게 담은 앵커가 조용히 사라진다.
+    """
+    from tablefold.clustering.select import ExplicitSelector
+    from tablefold.presentation import fidelity as fid
+
+    every = [t.name for t in retail_schema.tables]
+    result = fold(
+        retail_schema,
+        infer_missing_keys=False,
+        selector=ExplicitSelector(every, prune_redundant=True),
+        policy=SelectionPolicy(max_areas=len(every)),
+        field_budget=10_000,
+        max_hops=1,
+    )
+    measured = fid.measure(result.layer, result.graph)
+    covered = {
+        t.lower()
+        for m in result.layer.models
+        for t in (m.base_table, *m.absorbed_tables)
+    }
+
+    assert len(covered) == len(retail_schema.tables)
+    assert measured.pair_answerability == 1.0
+
+
+def test_pruning_is_off_by_default(retail_schema):
+    """호출자가 이름을 지목했으면 기본값은 그대로 두는 것이다."""
+    from tablefold.clustering.select import ExplicitSelector
+
+    names = [t.name for t in retail_schema.tables[:5]]
+    result = fold(
+        retail_schema,
+        infer_missing_keys=False,
+        selector=ExplicitSelector(names),
+        policy=SelectionPolicy(max_areas=len(names)),
+    )
+
+    assert [m.base_table for m in result.layer.models] == names

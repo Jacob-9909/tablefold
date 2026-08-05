@@ -205,31 +205,92 @@ class ExplicitSelector:
     래티스에 없는 이름은 조용히 버린다. :class:`LLMSelector` 와 같은 규칙이며,
     이유도 같다 — 존재하지 않는 앵커는 ``compose`` 까지 흘러가서 거기서 터지느니
     선택 단계에서 사라지는 편이 낫다.
+
+    ``prune_redundant`` 를 켜면 아무것도 새로 사지 않는 앵커를 뺀다. 팩트와 차원을
+    모두 앵커로 주는 스타 스키마에서 필요하다 — 그 조합은 대개 절반이 낭비다.
+    NL2SQL 19테이블에서 팩트 앵커 10개 중 5개는 답할 수 있는 질문을 **하나도**
+    늘리지 않았다. 이미 차원 앵커가 같은 조합을 담고 있었기 때문이다. 빼도
+    답변가능률은 100% 그대로이고 모델만 19개에서 14개로 준다.
     """
 
-    def __init__(self, anchors: tuple[str, ...] | list[str]) -> None:
+    def __init__(
+        self,
+        anchors: tuple[str, ...] | list[str],
+        *,
+        prune_redundant: bool = False,
+    ) -> None:
         self._anchors = tuple(anchors)
+        self._prune = prune_redundant
 
     def select(self, lattice: CandidateLattice, policy: SelectionPolicy) -> Selection:
         if not lattice.candidates:
             return Selection((), StopReason.NO_CANDIDATES, self.label)
 
-        chosen: list[Choice] = []
+        resolved: list[Candidate] = []
         seen: set[str] = set()
         for name in self._anchors:
             candidate = lattice.get(name)
             if candidate is None or candidate.name.lower() in seen:
                 continue
             seen.add(candidate.name.lower())
-            chosen.append(Choice(anchor=candidate.name))
-            if policy.max_areas is not None and len(chosen) >= policy.max_areas:
-                break
+            resolved.append(candidate)
+
+        if self._prune:
+            resolved = _drop_redundant(resolved)
+
+        chosen = [Choice(anchor=c.name) for c in resolved]
+        if policy.max_areas is not None:
+            chosen = chosen[: policy.max_areas]
 
         return Selection(tuple(chosen), StopReason.SELECTOR_CHOSE, self.label)
 
     @property
     def label(self) -> str:
-        return "explicit"
+        return "explicit (pruned)" if self._prune else "explicit"
+
+
+def _pairs_of(candidate: Candidate) -> set[frozenset[str]]:
+    """이 앵커가 한 모델 안에 함께 놓는 테이블 쌍들.
+
+    앵커가 사는 것은 테이블이 아니라 *조합* 이다. 어떤 테이블을 담고 있어도 그
+    조합을 다른 앵커가 이미 담고 있으면 새로 답할 수 있게 되는 질문은 없다.
+    """
+    members = sorted(candidate.reach)
+    return {
+        frozenset((a, b))
+        for i, a in enumerate(members)
+        for b in members[i + 1 :]
+    }
+
+
+def _drop_redundant(candidates: list[Candidate]) -> list[Candidate]:
+    """조합도 테이블도 새로 데려오지 않는 앵커를 뺀다.
+
+    작게 기여하는 것부터 빼 본다. 크게 기여하는 앵커를 먼저 빼면 그 자리를
+    작은 것 여럿이 메우게 되어 결과가 커진다.
+
+    쌍만 보면 안 된다. 이웃이 하나도 없는 테이블은 어떤 쌍에도 안 들어가므로,
+    그 테이블을 유일하게 담은 앵커가 조용히 사라진다. 커버리지도 함께 본다.
+    """
+    if len(candidates) <= 1:
+        return candidates
+
+    pairs = {c.name: _pairs_of(c) for c in candidates}
+    order = sorted(candidates, key=lambda c: (len(pairs[c.name]), c.name))
+
+    kept = list(candidates)
+    for candidate in order:
+        rest = [c for c in kept if c.name != candidate.name]
+        if not rest:
+            break
+        covers_pairs = set().union(*(pairs[c.name] for c in rest))
+        covers_tables = set().union(*(c.reach for c in rest))
+        if pairs[candidate.name] <= covers_pairs and candidate.reach <= covers_tables:
+            kept = rest
+
+    # 입력 순서를 지킨다. 호출자가 준 순서에 뜻이 있을 수 있다.
+    keep_names = {c.name for c in kept}
+    return [c for c in candidates if c.name in keep_names]
 
 
 # ── greedy ────────────────────────────────────────────────────────────────────

@@ -111,8 +111,14 @@ def _load_source(req: FoldRequest | ExpandRequest):
         # 팩트 앵커의 27%는 추상적인 결함이 아니다. 골드셋 48문항 중 12문항이
         # "매출과 계획이 서로 다른 모델에 있어 답할 수 없다"로 거부됐고, 그 12건이
         # 정확히 이 분모와 분자의 차이다.
+        # 혼합은 팩트와 차원을 그냥 합친 목록이라 절반이 낭비다. 실측(NL2SQL):
+        # 팩트 앵커 10개 중 5개는 답할 수 있는 질문을 하나도 늘리지 않았다 —
+        # 이미 차원 앵커가 같은 조합을 담고 있었다. 중복을 빼면 모델 19→8,
+        # 프롬프트 19,002→12,388자, 답변가능률은 100% 그대로다.
+        prune = False
         if req.anchor_mode == "mixed" and facts and dims:
             anchors, aggregates, filters = facts + dims, True, True
+            prune = True
         elif req.anchor_mode == "dim" and dims:
             anchors, aggregates, filters = dims, True, True
         elif facts:
@@ -121,7 +127,9 @@ def _load_source(req: FoldRequest | ExpandRequest):
             anchors, aggregates, filters = (), True, False
 
         options = {
-            "selector": ExplicitSelector(anchors) if anchors else None,
+            "selector": (
+                ExplicitSelector(anchors, prune_redundant=prune) if anchors else None
+            ),
             "infer_missing_keys": False,
             "include_aggregates": aggregates,
             "expose_child_filters": filters,

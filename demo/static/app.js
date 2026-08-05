@@ -240,8 +240,23 @@ function renderHeadline(data) {
     lengthNote;
 
   $("factModels").textContent = num(tier.tier1_core_models_count);
-  $("factCovered").textContent = num(tier.tier1_covered_physical_tables_count);
-  $("factCoveredHelp").textContent = `전체 ${num(tier.total_physical_tables_count)}개 중`;
+
+  // 담긴 표의 수를 쓴다. 예전에는 "묶인 테이블 19 / 전체 19개 중"을 썼는데,
+  // 그건 커버리지지 압축이 아니다. 모델 수와 나란히 놓으면 두 19가 붙어서
+  // 아무것도 안 한 것처럼 읽힌다. 실제로 줄어드는 것은 읽는 쪽이 쓰는 조인이고,
+  // 그걸 만드는 것은 모델 하나가 몇 개의 표를 안고 있느냐다.
+  const models = data.logical.models;
+  const absorbed = models.reduce((n, m) => n + m.absorbed_tables.length + 1, 0);
+  const avg = models.length ? absorbed / models.length : 0;
+  const widest = models.reduce(
+    (best, m) => (m.absorbed_tables.length > best.absorbed_tables.length ? m : best),
+    models[0] || { name: "", absorbed_tables: [] }
+  );
+  $("factCovered").textContent = avg.toFixed(1);
+  $("factCoveredHelp").textContent = widest.name
+    ? `가장 많은 ${widest.name}는 ${num(widest.absorbed_tables.length + 1)}개`
+    : "";
+
   $("factEdge").textContent = num(tier.tier2_edge_tables_count);
   $("factLinks").textContent = num(data.physical.inferred_fk_count);
 }
