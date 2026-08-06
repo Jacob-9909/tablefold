@@ -85,6 +85,17 @@ class ExpansionError(Exception):
     """The query cannot be expanded against the given logical layer."""
 
 
+class FilterOnlyMisuse(ExpansionError):
+    """필터 전용 필드를 값으로 쓰려 했다.
+
+    별도 타입인 이유는 **다른 모델로 바꿔도 안 되는 거부**이기 때문이다. 모르는
+    필드는 다른 모델에 있을 수 있지만, 필터 전용 필드를 ``SELECT`` 나 ``CASE``
+    에 쓰는 것은 어느 모델에서도 뜻이 성립하지 않는다 — 앵커 한 행에 대응하는
+    값이 자체가 없다. 호출자가 "모델을 바꿔 볼까"와 "그래 봐야 소용없다"를
+    문자열 파싱 없이 가를 수 있어야 한다.
+    """
+
+
 @dataclass(frozen=True)
 class ExpansionResult:
     sql: str
@@ -115,6 +126,7 @@ def expand(
         raise ExpansionError(f"could not parse SQL: {exc}") from exc
 
     _reject_shadowing_ctes(statement, layer, graph)
+    _reject_self_join(statement, layer)
 
     referenced = _referenced_models(statement, layer)
     if not referenced:
@@ -232,6 +244,59 @@ def _reject_shadowing_ctes(
         )
 
 
+def _table_sources(select: exp.Select) -> list[exp.Table]:
+    """이 ``SELECT`` 가 직접 읽는 테이블. 서브쿼리 안쪽은 세지 않는다.
+
+    ``FROM`` 과 ``JOIN`` 의 *직속* 자식만 본다. ``find_all`` 로 훑으면 ``FROM``
+    안의 서브쿼리가 읽는 테이블까지 딸려 오는데, 그건 이 ``SELECT`` 의 행 수를
+    바꾸지 않고 자기 ``Select`` 노드로 따로 검사된다.
+
+    sqlglot 은 버전에 따라 ``from`` 과 ``from_`` 중 하나를 키로 쓴다. 둘 다 본다 —
+    못 찾으면 검사가 조용히 아무것도 안 하게 되고, 그게 이 함수가 막으려는 것보다
+    나쁘다.
+    """
+    found: list[exp.Table] = []
+    source = select.args.get("from_") or select.args.get("from")
+    if source is not None and isinstance(source.this, exp.Table):
+        found.append(source.this)
+    for join in select.args.get("joins") or []:
+        if isinstance(join.this, exp.Table):
+            found.append(join.this)
+    return found
+
+
+def _reject_self_join(statement: exp.Expression, layer: LogicalLayer) -> None:
+    """같은 모델을 한 ``FROM`` 절에 두 번 놓으면 거부한다.
+
+    ``FROM m AS a, m AS b`` 는 두 CTE 의 곱집합이다. 모델 하나가 입도를 지켜도
+    자기 자신과 이으면 행이 곱해지고, ``GROUP BY`` 가 한쪽 키로만 걸리면 합계가
+    상대편 행 수만큼 부푼다 — 3장의 "49배" 와 같은 종류이고, 문법이 맞으므로
+    데이터베이스는 조용히 실행한다.
+
+    :func:`_reject_multiple_models` 가 못 잡는다. 그쪽은 서로 다른 모델 *이름* 의
+    수를 세는데, 자기 조인은 이름이 하나다. 스칼라 서브쿼리에서 같은 모델을 다시
+    읽는 정상 질의를 막지 않으려면 두 검사가 따로 있어야 한다 — 서브쿼리는 자기
+    ``Select`` 를 가지므로 여기서 세어지지 않는다.
+
+    실제로 LLM 이 이 모양을 냈다: "A사업장과 B사업장 비교" 에 ``FROM D_SA_ORG A,
+    D_SA_ORG B`` 로 답했고, 고치기 전에는 통과했다.
+    """
+    for select in statement.find_all(exp.Select):
+        seen: set[str] = set()
+        for table in _table_sources(select):
+            model = layer.model(table.name)
+            if model is None:
+                continue
+            if model.name.lower() in seen:
+                raise ExpansionError(
+                    f"query joins model '{model.name}' to itself; "
+                    "한 FROM 절에 같은 모델은 한 번만 놓는다 — 자기 조인은 행을 "
+                    "곱해서 합계를 부풀린다. 두 값을 나란히 보려면 조건부 집계를 "
+                    "쓴다: SUM(CASE WHEN … THEN x ELSE 0 END)"
+                )
+            seen.add(model.name.lower())
+
+
 def _reject_multiple_models(statement: exp.Expression, layer: LogicalLayer) -> None:
     """모델을 두 번 이상 참조하면 거부한다.
 
@@ -319,7 +384,13 @@ def _pushdown(
     OR 로 묶인 조건은 쪼개면 뜻이 달라지므로 손대지 않는다 — 그런 조건이 필터
     전용 필드를 건드리면 :func:`expand` 가 거부한다.
 
-    반환값의 두 번째 항목은 ``(모델, 자식 테이블) -> [(조건, 필드)]`` 이다.
+    반환값의 두 번째 항목은 ``(모델, 자식 키) -> [(조건, 필드)]`` 이다. 자식 키는
+    :func:`_child_key` — 테이블 이름만으로는 부족하다. 한 자식이 부모를 두 키로
+    참조하면 (``order_links.src_order_id`` 와 ``dst_order_id``) 집계는
+    :func:`_child_key` 로 갈라지는데 술어를 테이블 이름으로만 찾으면 두 집계가
+    같은 조건을 받는다. 사용자가 조건을 걸지 않은 집계까지 걸러지고 그 조인이
+    ``LEFT`` 에서 ``INNER`` 로 뒤집힌다 — 에러 없이 값이 틀린다.
+
     필드를 같이 들고 다니는 이유는, 조건이 자식이 아니라 자식이 *가리키는*
     차원에 걸릴 수 있기 때문이다. 그 경우 집계 서브쿼리 안에 조인이 하나 더
     필요하고, 어느 조인인지는 필드의 경로에만 적혀 있다.
@@ -378,7 +449,7 @@ def _pushdown(
                         "table", exp.to_identifier(qualifier) if qualifier else None
                     )
             pushed.setdefault(
-                (model.name.lower(), field.source.path[0].to_table.lower()), []
+                (model.name.lower(), _child_key(field.source.path[0])), []
             ).append((moved, field))
 
         select.set(
@@ -404,7 +475,7 @@ def _reject_unpushable(
         c.name.lower() for c in statement.find_all(exp.Column) if c.name
     } & _filter_only_names(models)
     if leftover:
-        raise ExpansionError(
+        raise FilterOnlyMisuse(
             f"filter-only fields cannot be used here: {', '.join(sorted(leftover))}; "
             "they may only appear in WHERE, joined by AND, one field per condition"
         )
@@ -423,7 +494,7 @@ def _reject_projected_filters(
     }
     bad = projected & {f.name.lower() for f in fields if f.filter_only}
     if bad:
-        raise ExpansionError(
+        raise FilterOnlyMisuse(
             f"model '{model.name}' fields {', '.join(sorted(bad))} are filter-only; "
             "they carry no value at the model's grain and cannot be selected"
         )
@@ -512,7 +583,8 @@ def _build_model_select(
     graph: SchemaGraph,
     fields: tuple[LogicalField, ...],
     *,
-    pushed: dict[tuple[str, str], list[exp.Expression]] | None = None,
+    pushed: dict[tuple[str, str], list[tuple[exp.Expression, LogicalField]]]
+    | None = None,
 ) -> tuple[exp.Select, int]:
     base = graph.schema.table(model.base_table)
     if base is None:
@@ -576,9 +648,9 @@ def _build_model_select(
         )
 
     for key, step in sorted(child_steps.items()):
-        predicates = (pushed or {}).get(
-            (model.name.lower(), step.to_table.lower()), []
-        )
+        # 술어도 집계와 같은 키로 찾는다. 테이블 이름으로 찾으면 같은 자식을
+        # 두 키로 접은 두 집계가 서로의 조건을 받는다 — :func:`_pushdown` 참고.
+        predicates = (pushed or {}).get((model.name.lower(), key), [])
         subquery = _aggregate_subquery(
             step.to_table, step, child_fields.get(key, []), graph,
             predicates=predicates,

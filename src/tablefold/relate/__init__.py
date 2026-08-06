@@ -7,5 +7,19 @@
 
 from tablefold.relate.graph import SchemaGraph, infer_foreign_keys
 from tablefold.relate.keys import infer_from_primary_keys
+from tablefold.relate.validate import (
+    recover_with_data,
+    unique_single_keys,
+    validate_foreign_keys,
+    violation_rate,
+)
 
-__all__ = ["SchemaGraph", "infer_foreign_keys", "infer_from_primary_keys"]
+__all__ = [
+    "SchemaGraph",
+    "infer_foreign_keys",
+    "infer_from_primary_keys",
+    "recover_with_data",
+    "unique_single_keys",
+    "validate_foreign_keys",
+    "violation_rate",
+]

@@ -79,6 +79,29 @@ def test_two_models_in_one_query_are_rejected(retail_schema):
         )
 
 
+def test_the_same_model_twice_in_one_from_is_rejected(retail_schema):
+    """같은 모델을 두 별칭으로 이으면 행이 곱해진다.
+
+    ``_reject_multiple_models`` 는 서로 다른 모델 *이름* 의 수를 센다. 같은 모델을
+    스칼라 서브쿼리에서 다시 읽는 정상 질의를 막지 않으려고 그렇게 만들었는데,
+    ``FROM m A, m B`` 는 서브쿼리가 아니라 **조인** 이다. ``GROUP BY`` 가 한쪽
+    키로만 걸리면 합계가 상대편 행 수만큼 부푼다 — 3장의 "49배" 와 같은 종류다.
+
+    실제로 LLM 이 이 모양을 냈다 (골드셋 SA_0004, "A사업장과 B사업장 비교").
+    """
+    result = fold(retail_schema, policy=SelectionPolicy(max_areas=1))
+    model = result.layer.models[0]
+    value = next(f.name for f in model.fields if not f.filter_only)
+
+    for sql in (
+        f"SELECT SUM(a.{value}) FROM {model.name} a, {model.name} b",
+        f"SELECT SUM(a.{value}) FROM {model.name} a "
+        f"JOIN {model.name} b ON a.{value} = b.{value}",
+    ):
+        with pytest.raises(ExpansionError, match="한 번만"):
+            expand(sql, result.layer, result.graph)
+
+
 def test_one_model_may_appear_more_than_once(retail_schema):
     """같은 모델을 다시 읽는 것은 막지 않는다.
 
@@ -457,6 +480,79 @@ def test_two_child_fks_get_two_subqueries():
     assert "src_order_id" in sql
     assert "dst_order_id" in sql
     assert sql.upper().count("GROUP BY") == 2
+
+
+def test_a_pushed_predicate_reaches_only_its_own_child_subquery():
+    """자식이 부모를 두 키로 참조할 때, 한쪽 집계에 건 조건이 다른 쪽 집계로
+    새면 안 된다.
+
+    술어를 자식 *테이블 이름* 으로만 찾으면 두 집계가 같은 키에 걸린다. 조건이
+    양쪽 서브쿼리에 다 들어가고, 사용자가 조건을 걸지 않은 집계까지 걸러지면서
+    그 조인이 ``LEFT`` 에서 ``INNER`` 로 뒤집힌다 — 에러 없이 값이 틀린다.
+    """
+    from tablefold.choose.select import ExplicitSelector
+
+    orders = PhysicalTable(
+        name="orders",
+        columns=(
+            PhysicalColumn("order_id", "bigint", nullable=False),
+            PhysicalColumn("label", "varchar"),
+        ),
+        primary_key=("order_id",),
+    )
+    links = PhysicalTable(
+        name="order_links",
+        columns=(
+            PhysicalColumn("link_id", "bigint", nullable=False),
+            PhysicalColumn("src_order_id", "bigint"),
+            PhysicalColumn("dst_order_id", "bigint"),
+            PhysicalColumn("qty", "integer"),
+            PhysicalColumn("kind", "varchar"),
+        ),
+        primary_key=("link_id",),
+    )
+    schema = PhysicalSchema(
+        tables=(orders, links),
+        foreign_keys=(
+            ForeignKey("order_links", ("src_order_id",), "orders", ("order_id",)),
+            ForeignKey("order_links", ("dst_order_id",), "orders", ("order_id",)),
+        ),
+    )
+    result = fold(
+        schema,
+        infer_missing_keys=False,
+        selector=ExplicitSelector(("orders",)),
+        policy=SelectionPolicy(max_areas=1),
+        field_budget=10_000,
+        expose_child_filters=True,
+    )
+    model = result.layer.model("orders")
+
+    def named(column: str, key: str, *, filter_only: bool) -> str:
+        return next(
+            f.name
+            for f in model.fields
+            if f.filter_only is filter_only
+            and f.source.column == column
+            and f.source.path
+            and f.source.path[0].to_columns == (key,)
+        )
+
+    condition = named("kind", "dst_order_id", filter_only=True)
+    dst_sum = named("qty", "dst_order_id", filter_only=False)
+    src_sum = named("qty", "src_order_id", filter_only=False)
+
+    sql = expand(
+        f"SELECT label, SUM({src_sum}), SUM({dst_sum}) FROM orders "
+        f"WHERE {condition} = 'A' GROUP BY label",
+        result.layer,
+        result.graph,
+    ).sql
+
+    # 조건이 걸린 자식은 하나뿐이다. 서브쿼리 두 개 중 하나에만 WHERE 가 있고,
+    # 조건 없는 쪽은 LEFT 로 남아야 한다.
+    assert sql.upper().count("WHERE") == 1
+    assert "LEFT JOIN" in sql.upper()
 
 
 # ── 추론과 이름 ───────────────────────────────────────────────────────────────

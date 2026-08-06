@@ -55,6 +55,7 @@ from tablefold.report.prompt import (
     to_yaml,
 )
 from tablefold.rewrite.expand import ExpansionError, expand
+from tablefold.t2sql import GenerationResult, TextToSQLEngine, generate_sql
 
 __all__ = [
     "DEFAULT_FIELD_BUDGET",
@@ -65,6 +66,7 @@ __all__ = [
     "FieldKind",
     "FoldResult",
     "ForeignKey",
+    "GenerationResult",
     "JoinStep",
     "LLMSelector",
     "LogicalField",
@@ -78,11 +80,13 @@ __all__ = [
     "Selector",
     "SubjectArea",
     "TableProfile",
+    "TextToSQLEngine",
     "cluster",
     "compose",
     "estimate_fields",
     "expand",
     "fold",
+    "generate_sql",
     "infer_foreign_keys",
     "infer_from_primary_keys",
     "profile_tables",
@@ -93,3 +97,4 @@ __all__ = [
     "to_json",
     "to_yaml",
 ]
+

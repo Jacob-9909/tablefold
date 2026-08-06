@@ -10,12 +10,56 @@ Postgres와 다른 점은 행 수 추정의 출처다. SQL Server에는 ``reltup
 
 from __future__ import annotations
 
+import functools
+import os
+from collections.abc import Callable
+
 from tablefold.ir import (
     ForeignKey,
     PhysicalColumn,
     PhysicalSchema,
     PhysicalTable,
 )
+
+
+class MSSQLUnavailable(RuntimeError):
+    """접속 정보가 없거나 드라이버가 설치되어 있지 않다."""
+
+
+ENV_PREFIX = "TABLEFOLD_MSSQL_"
+
+
+def connect_from_env() -> Callable[[], object]:
+    """환경 변수로 접속 팩토리를 만든다. 자격 증명을 소스에 두지 않는다.
+
+    ``TABLEFOLD_MSSQL_HOST`` / ``PORT`` / ``USER`` / ``PASSWORD`` / ``DB``.
+    실패하면 :class:`MSSQLUnavailable` — 가짜 스키마로 대신하지 않는다. 화면이
+    "연결됨"이라고 말하면서 지어낸 표를 보여 주는 것보다 없다고 말하는 게 낫다.
+    """
+    dsn = {
+        "server": os.environ.get(f"{ENV_PREFIX}HOST", ""),
+        "port": int(os.environ.get(f"{ENV_PREFIX}PORT", "1433")),
+        "user": os.environ.get(f"{ENV_PREFIX}USER", ""),
+        "password": os.environ.get(f"{ENV_PREFIX}PASSWORD", ""),
+        "database": os.environ.get(f"{ENV_PREFIX}DB", ""),
+    }
+    if not dsn["server"] or not dsn["database"]:
+        raise MSSQLUnavailable(
+            f"{ENV_PREFIX}HOST / {ENV_PREFIX}DB 가 설정되어 있지 않다"
+        )
+    try:
+        import pymssql
+    except ImportError as exc:
+        raise MSSQLUnavailable("pymssql 이 설치되어 있지 않다: uv add pymssql") from exc
+    return functools.partial(pymssql.connect, **dsn)
+
+
+def env_configured() -> bool:
+    """환경 변수가 채워져 있는가. 붙어 보지는 않는다."""
+    return bool(
+        os.environ.get(f"{ENV_PREFIX}HOST") and os.environ.get(f"{ENV_PREFIX}DB")
+    )
+
 
 _TABLES_SQL = """
 SELECT t.name,
@@ -88,7 +132,9 @@ class MSSQLIntrospector:
     덕분에 이 모듈은 테스트에서 가짜 연결로도 돌릴 수 있다.
     """
 
-    def __init__(self, connect, *, schema: str = "dbo", paramstyle: str = "auto") -> None:
+    def __init__(
+        self, connect, *, schema: str = "dbo", paramstyle: str = "auto"
+    ) -> None:
         self._connect = connect
         self._schema = schema
         self._paramstyle = paramstyle

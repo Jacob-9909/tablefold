@@ -69,6 +69,20 @@ class ExpandRequest(BaseModel):
     max_areas: int | None = 6
 
 
+class ChatRequest(BaseModel):
+    question: str
+    ddl: str = ""
+    source: str = "ddl"
+    dialect: str = "postgres"
+    anchor_mode: str = "auto"
+    coverage: float = 0.90
+    min_gain: int = 2
+    max_cost: float = 10.0
+    field_budget: int = DEFAULT_FIELD_BUDGET
+    max_areas: int | None = 6
+
+
+
 @app.get("/api/sample")
 def get_sample_ddl() -> dict[str, str]:
     sample_file = FIXTURES_DIR / "retail_50.sql"
@@ -423,6 +437,81 @@ def run_expand(req: ExpandRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/chat")
+def run_chat(req: ChatRequest) -> dict[str, Any]:
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="Question is required.")
+
+    # Load schema based on request or default enterprise_bi fixture if empty
+    if not req.ddl.strip() and req.source == "ddl":
+        default_file = FIXTURES_DIR / "enterprise_bi.sql"
+        if default_file.exists():
+            req.ddl = default_file.read_text(encoding="utf-8")
+        else:
+            sample_file = FIXTURES_DIR / "retail_50.sql"
+            req.ddl = sample_file.read_text(encoding="utf-8")
+
+    try:
+        schema, _, _ = _load_source(req)
+        inferred = tuple(fk for fk in schema.foreign_keys if fk.inferred)
+
+        from tablefold.t2sql import (
+            NL2SQL_EXAMPLES,
+            TextToSQLEngine,
+            default_completer,
+            prepare_for_questions,
+        )
+
+        prep = prepare_for_questions(
+            schema,
+            already_recovered=len(inferred) if req.source == "live" else 0,
+        )
+
+        engine = TextToSQLEngine(
+            prep.result,
+            completer=default_completer(),
+            examples=NL2SQL_EXAMPLES,
+            dialect=req.dialect,
+        )
+
+        gen_res = engine.generate(req.question)
+        exec_res = live.execute_query(gen_res.physical_sql)
+
+        return {
+            "question": gen_res.question,
+            "logical_sql": gen_res.logical_sql,
+            "physical_sql": gen_res.physical_sql,
+            "models_used": list(gen_res.models_used),
+            "fields_used": list(gen_res.fields_used),
+            "joins_emitted": gen_res.joins_emitted,
+            "joins_available": gen_res.joins_available,
+            "joins_pruned": gen_res.joins_pruned,
+            "repairs": gen_res.repairs,
+            "attempts_count": len(gen_res.attempts),
+            "preparation_note": prep.note,
+            "routed_to": gen_res.routed_to,
+            "source_kind": req.source,
+            "execution_result": exec_res,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+
+from fastapi.responses import FileResponse
+
 static_path = Path(__file__).parent / "static"
+
+
+@app.get("/chat")
+def get_chat_page():
+    chat_file = static_path / "chat.html"
+    if chat_file.exists():
+        return FileResponse(chat_file)
+    raise HTTPException(status_code=404, detail="Chat page not found.")
+
+
 if static_path.exists():
     app.mount("/", StaticFiles(directory=static_path, html=True), name="static")
+

@@ -11,15 +11,22 @@
 
 from __future__ import annotations
 
-import functools
 import os
-from dataclasses import replace
 
-from tablefold.ir import ForeignKey, PhysicalSchema
-from tablefold.read.mssql import MSSQLIntrospector
-from tablefold.relate.keys import infer_from_primary_keys
+from dotenv import load_dotenv
 
-VIOLATION_TOLERANCE = 0.01
+from tablefold.ir import PhysicalSchema
+from tablefold.read.mssql import (
+    MSSQLIntrospector,
+    MSSQLUnavailable,
+    connect_from_env,
+    env_configured,
+)
+from tablefold.relate.validate import DEFAULT_VIOLATION_TOLERANCE, recover_with_data
+
+load_dotenv()
+
+VIOLATION_TOLERANCE = DEFAULT_VIOLATION_TOLERANCE
 
 
 class LiveUnavailable(RuntimeError):
@@ -27,20 +34,12 @@ class LiveUnavailable(RuntimeError):
 
 
 def _connect():
-    dsn = {
-        "server": os.environ.get("TABLEFOLD_MSSQL_HOST", ""),
-        "port": int(os.environ.get("TABLEFOLD_MSSQL_PORT", "1433")),
-        "user": os.environ.get("TABLEFOLD_MSSQL_USER", ""),
-        "password": os.environ.get("TABLEFOLD_MSSQL_PASSWORD", ""),
-        "database": os.environ.get("TABLEFOLD_MSSQL_DB", ""),
-    }
-    if not dsn["server"] or not dsn["database"]:
-        raise LiveUnavailable("Environment credentials not set.")
+    """접속 팩토리. 로직은 :mod:`tablefold.read.mssql` 에 있다 — 화면과 CLI 가
+    같은 자격 증명과 같은 실패 메시지를 쓰게 하려는 것이다."""
     try:
-        import pymssql
-    except ImportError as exc:
-        raise LiveUnavailable("pymssql 이 설치되어 있지 않습니다.") from exc
-    return functools.partial(pymssql.connect, **dsn)
+        return connect_from_env()
+    except MSSQLUnavailable as exc:
+        raise LiveUnavailable(str(exc)) from exc
 
 
 def available() -> bool:
@@ -82,10 +81,7 @@ def load(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
 
 
 def available_real_db() -> bool:
-    return bool(
-        os.environ.get("TABLEFOLD_MSSQL_HOST")
-        and os.environ.get("TABLEFOLD_MSSQL_DB")
-    )
+    return env_configured()
 
 
 def _load_real(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
@@ -98,82 +94,71 @@ def _load_real(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
     dims = tuple(t.name for t in schema.tables if t.name.upper().startswith("D_"))
     facts = tuple(t.name for t in schema.tables if t.name.upper().startswith("F_"))
 
+    # 관계 복구와 데이터 검증은 라이브러리에 있다. 한때 이 파일에만 있었고,
+    # 그래서 CLI 로는 같은 레이어를 낼 수 없었다 — 같은 스키마인데 화면과
+    # 명령줄이 다른 답을 주는 상태였다.
     conn = connect()
-    cur = conn.cursor()
-    subsets = _unique_subsets(cur, schema)
-    candidates = infer_from_primary_keys(
-        schema, targets=dims or None, unique_subsets=subsets
-    )
+    try:
+        schema, recovered = recover_with_data(
+            schema, conn.cursor(), targets=dims or None
+        )
+    finally:
+        conn.close()
 
-    # 데이터가 통과시킨 관계는 **전부** 남긴다.
-    #
-    # 한때 같은 컬럼에서 나온 후보 중 가장 좁은 차원 하나만 골랐다. 더 구체적인
-    # 쪽이 의미상 맞다고 봤는데, 그게 그래프를 조각냈다. ``ORG_CD`` 는
-    # ``D_ORG``(46) · ``D_SA_ORG``(13) · ``D_FI_ORG``(10) 셋 모두에 위반 없이
-    # 들어맞는데, 좁은 쪽을 고르는 바람에 ``F_SALES`` 는 ``D_SA_ORG`` 로,
-    # ``F_STOCK`` 은 ``D_FI_ORG`` 로 끌려가 한 모델에서 만나지 못했다.
-    # 업무 주제 9개 중 구매와 인사가 그래서 답이 안 됐다.
-    #
-    # 전부 남기면 앵커 선택이 어느 쪽으로든 갈 수 있다. 실측으로 모델 8→6,
-    # 프롬프트 22,716→18,901자, 주제 7/9→9/9 — 모든 축에서 낫다. 넓은 차원이
-    # 늘어나도 중복 앵커 제거가 뒤에서 걸러 준다.
-    #
-    # 확신도도 측정값이다. ``from_keys`` 의 0.9 는 "스키마만 보고 지은 후보"라는
-    # 뜻의 자리표시자이므로, 실제로 잰 위반율로 바꿔 적는다.
-    validated: list[ForeignKey] = []
-    for fk in candidates:
-        rate = _violation_rate(cur, fk)
-        if rate > VIOLATION_TOLERANCE:
-            continue
-        validated.append(replace(fk, confidence=round(1.0 - rate, 4)))
-    conn.close()
-
-    # 같은 두 테이블 사이에 후보가 여럿이면 좁은 키 쪽만 남긴다. 넓은 키는
-    # 좁은 키를 포함하므로 조인 조건이 중복된다.
-    by_pair: dict[tuple[str, str], ForeignKey] = {}
-    for fk in validated:
-        pair = (fk.from_table.lower(), fk.to_table.lower())
-        if pair not in by_pair or len(fk.from_columns) < len(by_pair[pair].from_columns):
-            by_pair[pair] = fk
-
-    recovered = tuple(by_pair.values())
     meta = {
         "database": os.environ.get("TABLEFOLD_MSSQL_DB", ""),
         "schema": schema_name,
         "dimensions": list(dims),
         "facts": list(facts),
-        "declared_fk_count": len(schema.foreign_keys),
-        "candidate_fk_count": len(candidates),
+        "declared_fk_count": len(
+            [fk for fk in schema.foreign_keys if not fk.inferred]
+        ),
+        "candidate_fk_count": len(recovered),
         "recovered_fk_count": len(recovered),
         "ddl": render_ddl(schema),
     }
-    return schema.with_foreign_keys(schema.foreign_keys + recovered), meta
+    return schema, meta
 
 
-def _unique_subsets(cur, schema: PhysicalSchema) -> dict[str, tuple[str, ...]]:
-    found: dict[str, tuple[str, ...]] = {}
-    for table in schema.tables:
-        if len(table.primary_key) < 2:
-            continue
-        for column in table.primary_key:
-            if column.lower() in {"load_dt", "load_user"}:
-                continue
-            cur.execute(f"SELECT COUNT(*), COUNT(DISTINCT [{column}]) FROM [{table.name}]")
-            rows, distinct = cur.fetchone()
-            if rows and rows == distinct:
-                found[table.name] = (column,)
-                break
-    return found
+def execute_query(sql: str) -> dict[str, Any]:
+    """실제 데이터베이스에 쿼리를 실행하여 결과 행과 컬럼을 돌려준다."""
+    if not available_real_db():
+        return {
+            "status": "not_connected",
+            "message": "데이터베이스 연결 정보가 없습니다. (.env 파일의 TABLEFOLD_MSSQL_* 정보를 채워주세요)"
+        }
+    try:
+        connect_fn = _connect()
+        conn = connect_fn()
+        cursor = conn.cursor()
+        cursor.execute(sql)
 
+        columns = [col[0] for col in cursor.description] if cursor.description else []
+        raw_rows = cursor.fetchmany(50)
+        conn.close()
 
-def _violation_rate(cur, fk: ForeignKey) -> float:
-    on = " AND ".join(f"t.[{b}] = s.[{a}]" for a, b in zip(fk.from_columns, fk.to_columns))
-    not_null = " AND ".join(f"s.[{c}] IS NOT NULL" for c in fk.from_columns)
-    cur.execute(
-        f"SELECT COUNT(*) FROM [{fk.from_table}] s WHERE {not_null} "
-        f"AND NOT EXISTS (SELECT 1 FROM [{fk.to_table}] t WHERE {on})"
-    )
-    bad = cur.fetchone()[0]
-    cur.execute(f"SELECT COUNT(*) FROM [{fk.from_table}] s WHERE {not_null}")
-    total = cur.fetchone()[0]
-    return bad / total if total else 1.0
+        clean_rows = []
+        for r in raw_rows:
+            row_dict = {}
+            for col_idx, val in enumerate(r):
+                col_name = columns[col_idx] if col_idx < len(columns) else f"col_{col_idx}"
+                if hasattr(val, "isoformat"):
+                    row_dict[col_name] = val.isoformat()
+                elif isinstance(val, (int, float, str, bool)) or val is None:
+                    row_dict[col_name] = val
+                else:
+                    row_dict[col_name] = str(val)
+            clean_rows.append(row_dict)
+
+        return {
+            "status": "success",
+            "columns": columns,
+            "rows": clean_rows,
+            "row_count": len(clean_rows),
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+        }
+

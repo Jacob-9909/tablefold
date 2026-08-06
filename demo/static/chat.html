@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tablefold Text-to-SQL AI Chatbot</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .chat-container {
+      max-width: 1000px;
+      margin: 2rem auto;
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 160px);
+      background: var(--bg-card, #1e1e2d);
+      border-radius: 16px;
+      border: 1px solid var(--border-color, #2d2d3f);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.37);
+      overflow: hidden;
+    }
+    .chat-header {
+      padding: 1.2rem 1.8rem;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid var(--border-color, #2d2d3f);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .chat-header h2 {
+      margin: 0;
+      font-size: 1.25rem;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .controls-bar {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      padding: 0.8rem 1.8rem;
+      background: #181825;
+      border-bottom: 1px solid #313244;
+      font-size: 0.85rem;
+      color: #a6adc8;
+    }
+    .controls-bar select {
+      background: #11111b;
+      border: 1px solid #313244;
+      color: #cdd6f4;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      outline: none;
+    }
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.2rem;
+    }
+    .chat-bubble {
+      max-width: 85%;
+      padding: 1.2rem 1.5rem;
+      border-radius: 14px;
+      line-height: 1.6;
+      font-size: 0.95rem;
+      animation: fadeIn 0.3s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .user-bubble {
+      align-self: flex-end;
+      background: #4f46e5;
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .ai-bubble {
+      align-self: flex-start;
+      background: #181825;
+      color: #e2e8f0;
+      border: 1px solid #313244;
+      border-bottom-left-radius: 4px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .badge-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .badge {
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-weight: 600;
+      background: #313244;
+      color: #89b4fa;
+    }
+    .badge-green { background: #11382b; color: #a6e3a1; }
+    .badge-purple { background: #33254e; color: #cba6f7; }
+    .badge-yellow { background: #453a1f; color: #f9e2af; }
+
+    .sql-box {
+      background: #11111b;
+      border: 1px solid #313244;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-top: 10px;
+      position: relative;
+    }
+    .sql-box-title {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #9399b2;
+      margin-bottom: 6px;
+      font-weight: 700;
+    }
+    .sql-box code {
+      font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+      color: #a6e3a1;
+      font-size: 0.88rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .db-result-box {
+      background: #11111b;
+      border: 1px solid #313244;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-top: 12px;
+    }
+    .db-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+      margin-top: 8px;
+    }
+    .db-table th {
+      background: #181825;
+      color: #89b4fa;
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 1px solid #313244;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .db-table td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #1e1e2e;
+      color: #cdd6f4;
+      white-space: nowrap;
+    }
+    .db-table tr:hover td {
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .chat-input-area {
+      padding: 1.2rem 1.5rem;
+      background: rgba(255, 255, 255, 0.02);
+      border-top: 1px solid var(--border-color, #2d2d3f);
+    }
+    .preset-chips {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+    }
+    .chip {
+      background: #181825;
+      border: 1px solid #313244;
+      color: #b4befe;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.82rem;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+    .chip:hover {
+      background: #313244;
+      color: #fff;
+    }
+    .input-wrapper {
+      display: flex;
+      gap: 10px;
+    }
+    .input-wrapper input {
+      flex: 1;
+      background: #181825;
+      border: 1px solid #313244;
+      border-radius: 10px;
+      padding: 12px 16px;
+      color: #fff;
+      font-size: 0.95rem;
+      outline: none;
+    }
+    .input-wrapper input:focus {
+      border-color: #6366f1;
+    }
+    .send-btn {
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 0 24px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .send-btn:hover { opacity: 0.9; }
+    .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="wordmark">tablefold</div>
+    <div class="nav-links">
+      <a href="/">📊 대시보드</a>
+      <a href="/chat" class="active">💬 Text-to-SQL 챗봇</a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="chat-container">
+    <div class="chat-header">
+      <h2>🤖 Text-to-SQL AI Assistant <span style="font-size: 0.8rem; font-weight: normal; color: #a0a0c0;">(Powered by tablefold Unified Pipeline)</span></h2>
+    </div>
+
+    <div class="controls-bar">
+      <label>소스: 
+        <select id="sourceSelect">
+          <option value="ddl" selected>📄 예제 DDL 스키마 (19개 테이블)</option>
+          <option value="live">🔌 Live DB (도커 MSSQL)</option>
+        </select>
+      </label>
+      <label>방언: 
+        <select id="dialectSelect">
+          <option value="postgres" selected>PostgreSQL</option>
+          <option value="tsql">T-SQL / MSSQL</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="chat-messages" id="chatMessages">
+      <div class="chat-bubble ai-bubble">
+        <div style="font-weight: 600; font-size: 1.05rem; margin-bottom: 6px;">안녕하세요! tablefold GenBI 챗봇입니다.</div>
+        <p style="margin: 0; color: #a6adc8;">
+          자연어 질의를 입력하시면 LLM이 **조인 없는 논리 SQL**을 작성하고, `tablefold expand`가 **최적화된 물리 CTE SQL**로 자동 재작성합니다.<br>
+          데이터베이스가 연결된 경우 하단에 **실제 실행 결과 데이터 표**가 함께 표시됩니다.
+        </p>
+      </div>
+    </div>
+
+    <div class="chat-input-area">
+      <div class="preset-chips">
+        <div class="chip" onclick="setQuestion('선택월말 기준 거래처별 매출액과 수금액 알려줘')">💡 거래처별 매출/수금액</div>
+        <div class="chip" onclick="setQuestion('선택년도 1월~12월 직책별 인건비 추이정보 조회')">💡 직책별 인건비 추이</div>
+        <div class="chip" onclick="setQuestion('사업장별 매출 실적 및 목표 달성률 조회')">💡 영업조직 달성률</div>
+        <div class="chip" onclick="setQuestion('두 달 전 기준 제품별 기초재고금액과 기말재고금액 조회')">💡 제품별 재고자산 현황</div>
+      </div>
+      <form class="input-wrapper" id="chatForm" onsubmit="handleSend(event)">
+        <input type="text" id="userInput" placeholder="질문을 입력하세요... (예: 선택월말 기준 거래처별 매출액과 수금액 알려줘)" required autocomplete="off">
+        <button type="submit" class="send-btn" id="sendBtn">전송</button>
+      </form>
+    </div>
+  </div>
+</main>
+
+<script>
+  function setQuestion(text) {
+    document.getElementById('userInput').value = text;
+    document.getElementById('userInput').focus();
+  }
+
+  async function handleSend(e) {
+    e.preventDefault();
+    const input = document.getElementById('userInput');
+    const question = input.value.trim();
+    if (!question) return;
+
+    const source = document.getElementById('sourceSelect').value;
+    const dialect = document.getElementById('dialectSelect').value;
+
+    input.value = '';
+    const messages = document.getElementById('chatMessages');
+
+    // Add User Bubble
+    const userBubble = document.createElement('div');
+    userBubble.className = 'chat-bubble user-bubble';
+    userBubble.textContent = question;
+    messages.appendChild(userBubble);
+
+    // Add AI Loading Bubble
+    const aiBubble = document.createElement('div');
+    aiBubble.className = 'chat-bubble ai-bubble';
+    aiBubble.innerHTML = '<div style="color: #89b4fa;">⚡ LLM 논리 SQL 라우팅, tablefold 확장 및 DB 조회 실행 중...</div>';
+    messages.appendChild(aiBubble);
+    messages.scrollTop = messages.scrollHeight;
+
+    const btn = document.getElementById('sendBtn');
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: question,
+          source: source,
+          dialect: dialect
+        })
+      });
+
+      const data = await res.json();
+      btn.disabled = false;
+
+      if (!res.ok) {
+        aiBubble.innerHTML = `<div style="color: #f38ba8;">❌ 오류 발생: ${data.detail || 'SQL 생성 실패'}</div>`;
+        return;
+      }
+
+      // Build DB Result Table HTML
+      let dbTableHtml = '';
+      if (data.execution_result) {
+        const exec = data.execution_result;
+        if (exec.status === 'success' && exec.columns && exec.columns.length > 0) {
+          const headerCols = exec.columns.map(c => `<th>${escapeHtml(c)}</th>`).join('');
+          let bodyRows = '';
+          if (exec.rows && exec.rows.length > 0) {
+            bodyRows = exec.rows.map(row => {
+              const cells = exec.columns.map(c => `<td>${escapeHtml(String(row[c] !== undefined && row[c] !== null ? row[c] : ''))}</td>`).join('');
+              return `<tr>${cells}</tr>`;
+            }).join('');
+          } else {
+            bodyRows = `<tr><td colspan="${exec.columns.length}" style="text-align: center; color: #9399b2; padding: 16px;">조회된 데이터 행이 없습니다 (DB 쿼리 구문 정상, 데이터 0건)</td></tr>`;
+          }
+
+          dbTableHtml = `
+            <div class="db-result-box">
+              <div class="sql-box-title" style="color: #89b4fa; display:flex; justify-content: space-between;">
+                <span>📊 실제 DB 조회 결과 (${exec.row_count}건)</span>
+                <span style="font-weight: normal; color: #a6e3a1;">✅ 쿼리 실행 성공</span>
+              </div>
+              <div style="overflow-x: auto; max-height: 250px;">
+                <table class="db-table">
+                  <thead><tr>${headerCols}</tr></thead>
+                  <tbody>${bodyRows}</tbody>
+                </table>
+              </div>
+            </div>
+          `;
+        } else if (exec.status === 'error') {
+          dbTableHtml = `
+            <div class="db-result-box" style="border-color: #f38ba8;">
+              <div class="sql-box-title" style="color: #f38ba8;">⚠️ DB 쿼리 실행 오류</div>
+              <div style="color: #f38ba8; font-size: 0.85rem;">${escapeHtml(exec.error)}</div>
+            </div>
+          `;
+        } else if (exec.status === 'not_connected') {
+          dbTableHtml = `
+            <div class="db-result-box" style="border-color: #45475a;">
+              <div style="color: #9399b2; font-size: 0.82rem;">
+                💡 <b>실제 DB 연동 안내:</b> 스키마 쿼리 생성이 완료되었습니다. 실제 도커 DB 데이터 조회를 원하시면 <code>.env</code> 파일의 <code>TABLEFOLD_MSSQL_*</code> 접속 정보를 채워주세요.
+              </div>
+            </div>
+          `;
+        }
+      }
+
+      // Render Rich Result
+      aiBubble.innerHTML = `
+        <div class="badge-bar">
+          <span class="badge badge-purple">라우팅: ${data.routed_to || data.models_used.join(', ')}</span>
+          <span class="badge badge-green">조인 생략(Pruned): ${data.joins_pruned}개</span>
+          <span class="badge">생성 조인: ${data.joins_emitted}개</span>
+          ${data.preparation_note ? `<span class="badge badge-yellow">${escapeHtml(data.preparation_note)}</span>` : ''}
+          ${data.repairs > 0 ? `<span class="badge" style="background:#45475a; color:#f9e2af;">수리 횟수: ${data.repairs}회</span>` : ''}
+        </div>
+
+        <div class="sql-box">
+          <div class="sql-box-title">🧠 LLM 생성 논리 SQL (Logical Model Query)</div>
+          <code>${escapeHtml(data.logical_sql)}</code>
+        </div>
+
+        <div class="sql-box" style="border-color: #a6e3a1;">
+          <div class="sql-box-title" style="color: #a6e3a1;">⚡ tablefold expand 물리 SQL (Physical CTE Query)</div>
+          <code>${escapeHtml(data.physical_sql)}</code>
+        </div>
+
+        ${dbTableHtml}
+      `;
+      messages.scrollTop = messages.scrollHeight;
+
+    } catch (err) {
+      btn.disabled = false;
+      aiBubble.innerHTML = `<div style="color: #f38ba8;">❌ 네트워크 오류: ${err.message}</div>`;
+    }
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+</script>
+
+</body>
+</html>

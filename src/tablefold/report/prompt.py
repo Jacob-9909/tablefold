@@ -72,6 +72,64 @@ def _model_to_dict(model: LogicalModel) -> dict[str, Any]:
     }
 
 
+def render_model(model: LogicalModel) -> str:
+    """모델 하나의 정의. ``render_text`` 가 이걸 모아 레이어 전체를 만든다.
+
+    낱개로 뽑아 쓸 수 있어야 하는 이유는 프롬프트가 모델 하나만 담을 수 있기
+    때문이다(:mod:`tablefold.t2sql`). 그리고 **바이트가 안정적이어야** 한다 —
+    같은 모델에 대해 매번 같은 문자열이 나와야 프롬프트 캐시가 붙는다. 여기에
+    타임스탬프나 질문에 따라 달라지는 것을 섞으면 캐시가 조용히 죽는다.
+    """
+    lines = [f"### {model.name}"]
+    if model.description:
+        lines.append(model.description)
+
+    groups = (
+        (
+            "Own columns",
+            [
+                f
+                for f in model.fields
+                if f.source.kind is FieldKind.BASE and not f.filter_only
+            ],
+        ),
+        (
+            "Joined in (one related row each)",
+            [
+                f
+                for f in model.fields
+                if f.source.kind is FieldKind.JOINED and not f.filter_only
+            ],
+        ),
+        (
+            "Aggregated from child rows — 자식 행에 대해 이미 합산된 총계. "
+            "여러 행을 묶으려면 SUM 을 다시 써도 된다(이중 계산 아님). "
+            "AVG 는 총계들의 평균이 되어 뜻이 달라진다",
+            [
+                f
+                for f in model.fields
+                if f.source.kind is FieldKind.AGGREGATED and not f.filter_only
+            ],
+        ),
+        (
+            "WHERE 전용 — 위 집계에 조건을 걸 때만 쓴다. "
+            "SELECT 나 GROUP BY 에 쓸 수 없다",
+            [f for f in model.fields if f.filter_only],
+        ),
+    )
+
+    for label, group in groups:
+        if not group:
+            continue
+        lines.append(f"{label}:")
+        lines.extend(
+            f"  {f.name} ({f.type})" + (f" — {f.description}" if f.description else "")
+            for f in group
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_text(layer: LogicalLayer) -> str:
     """Compact schema text, sized for a prompt.
 
@@ -102,53 +160,7 @@ def render_text(layer: LogicalLayer) -> str:
     ]
 
     for model in layer.models:
-        lines.append(f"### {model.name}")
-        if model.description:
-            lines.append(model.description)
-
-        groups = (
-            (
-                "Own columns",
-                [
-                    f
-                    for f in model.fields
-                    if f.source.kind is FieldKind.BASE and not f.filter_only
-                ],
-            ),
-            (
-                "Joined in (one related row each)",
-                [
-                    f
-                    for f in model.fields
-                    if f.source.kind is FieldKind.JOINED and not f.filter_only
-                ],
-            ),
-            (
-                "Aggregated from child rows — 자식 행에 대해 이미 합산된 "
-                "총계. "
-                "여러 행을 묶으려면 SUM 을 다시 써도 된다(이중 계산 아님). "
-                "AVG 는 총계들의 평균이 되어 뜻이 달라진다",
-                [
-                    f
-                    for f in model.fields
-                    if f.source.kind is FieldKind.AGGREGATED and not f.filter_only
-                ],
-            ),
-            (
-                "WHERE 전용 — 위 집계에 조건을 걸 때만 쓴다. "
-                "SELECT 나 GROUP BY 에 쓸 수 없다",
-                [f for f in model.fields if f.filter_only],
-            ),
-        )
-
-        for label, group in groups:
-            if not group:
-                continue
-            lines.append(f"{label}:")
-            for f in group:
-                note = f" — {f.description}" if f.description else ""
-                lines.append(f"  {f.name} ({f.type}){note}")
-        lines.append("")
+        lines.append(render_model(model))
 
     if layer.notes:
         lines.append("=== TIER-2 EDGE TABLES (On-Demand / Specific Query Fallback) ===")
