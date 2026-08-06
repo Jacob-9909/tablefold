@@ -149,7 +149,10 @@ def estimate_fields(
             if expose_child_filters:
                 total += len(filterable_columns(child_table, graph, step, measures))
                 total += sum(
-                    len(cols) for _, cols in child_dimension_filters(child_table, graph)
+                    len(cols)
+                    for _, cols in child_dimension_filters(
+                        child_table, graph, anchor=anchor
+                    )
                 )
 
     return min(total, cap)
@@ -163,7 +166,7 @@ MAX_CHILD_DIMENSION_FILTERS = 4
 
 
 def child_dimension_filters(
-    child: PhysicalTable, graph: SchemaGraph
+    child: PhysicalTable, graph: SchemaGraph, *, anchor: str | None = None
 ) -> tuple[tuple[str, tuple[PhysicalColumn, ...]], ...]:
     """집계된 자식이 참조하는 차원과, 그 차원에서 조건으로 쓸 컬럼들.
 
@@ -174,11 +177,17 @@ def child_dimension_filters(
 
     한 홉만 따라간다. 두 홉을 더 가면 집계 서브쿼리 안의 조인이 깊어지는데,
     조건에 그만큼 먼 컬럼이 쓰이는 경우가 드물다.
+
+    ``anchor`` 를 주면 **앵커 자신으로 되돌아오는 차원을 뺀다.** 앵커가 차원일 때
+    자식은 대개 그 앵커를 참조하므로, 빼지 않으면 ``f_sales_HEAD_NM`` 처럼 앵커에
+    이미 있는 컬럼이 필터 필드로 한 번 더 생긴다. 조건을 걸 새 자리가 아니라
+    같은 값이고, 예산만 쓴다 — 실측 ``D_ORG`` 모델 145필드 중 12개가 이것이었다.
     """
+    blocked = {child.name.lower()} | ({anchor.lower()} if anchor else set())
     found: list[tuple[str, tuple[PhysicalColumn, ...]]] = []
     for fk in graph.outgoing(child.name):
         dim = graph.schema.table(fk.to_table)
-        if dim is None or dim.name.lower() == child.name.lower():
+        if dim is None or dim.name.lower() in blocked:
             continue
         columns = promotable_columns(dim, graph, drop_primary_key=True)
         if columns:

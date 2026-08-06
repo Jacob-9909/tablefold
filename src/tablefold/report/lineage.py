@@ -82,13 +82,24 @@ def to_graph(
 
 
 def _model_lineage(model: LogicalModel) -> dict[str, Any]:
-    """모델 하나가 어떤 테이블에서 무엇을 가져왔는지, 테이블 단위로 되짚는다."""
-    by_table: dict[str, dict[str, Any]] = {}
+    """모델 하나가 어떤 테이블에서 무엇을 가져왔는지, **경로 단위로** 되짚는다.
+
+    테이블 이름으로 묶으면 안 된다. 같은 표가 두 키로 들어오면 — ``orders`` 의
+    ``buyer_id`` 와 ``seller_id`` 가 둘 다 ``users`` 를 가리키는 흔한 모양 —
+    두 경로가 한 항목으로 뭉치고 ``join_columns`` 가 나중 것으로 덮인다. 화면이
+    그리는 ERD 에서 조인 하나가 통째로 사라진다.
+    """
+    by_table: dict[tuple[str, ...], dict[str, Any]] = {}
 
     for f in model.fields:
-        low = f.source.table.lower()
+        # 경로가 곧 정체성이다. 경로가 없으면(앵커 자신) 테이블 이름이 곧 경로다.
+        key = tuple(
+            f"{s.from_table.lower()}.{'/'.join(c.lower() for c in s.from_columns)}"
+            f"->{s.to_table.lower()}"
+            for s in f.source.path
+        ) or (f.source.table.lower(),)
         entry = by_table.setdefault(
-            low,
+            key,
             {
                 "table": f.source.table,
                 "role": _ROLE_OF_KIND[f.source.kind],

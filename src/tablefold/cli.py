@@ -14,6 +14,7 @@ from tablefold.ir import PhysicalSchema
 from tablefold.read.ddl import DDLIntrospector
 from tablefold.report import prompt as emit
 from tablefold.rewrite.expand import ExpansionError, expand
+from tablefold.t2sql.preset import STAR_MAX_HOPS, recover_relationships
 
 app = typer.Typer(
     add_completion=False,
@@ -168,6 +169,70 @@ def inspect_command(
         )
 
 
+@app.command("tune")
+def tune_command(
+    goldset: Annotated[
+        Path, typer.Argument(help="Excel goldset — 정답 SQL 이 든 시트.")
+    ],
+    ddl: DdlOption = None,
+    dsn: DsnOption = None,
+    mssql: MssqlOption = False,
+    schema: SchemaOption = "public",
+    max_hops: HopsOption = STAR_MAX_HOPS,
+    budgets: Annotated[
+        str,
+        typer.Option(
+            "--budgets",
+            help="쓸어 볼 프롬프트 길이(문자), 쉼표로. 비우면 기본 곡선.",
+        ),
+    ] = "",
+) -> None:
+    """프롬프트 길이 ↔ 답할 수 있는 질문 수의 **교환곡선**을 낸다.
+
+    설정을 하나 추천하는 대신 곡선을 준다. 노브가 존재하는 이유는 목적함수가
+    없어서인데, 골드셋이 목적함수가 되면 "얼마를 줄까"가 튜닝이 아니라 비용 대
+    커버리지의 **비즈니스 결정**이 된다.
+
+    LLM 을 부르지 않는다 — 정답 SQL 이 읽는 ``표.컬럼`` 을 레이어가 한 모델에서
+    내놓을 수 있는지 세는 것뿐이라 결정론적이고 무료다.
+    """
+    from tablefold.choose import tune as tuning
+    from tablefold.relate.synthesize import add_period_anchor
+    from tablefold.t2sql.goldset import load_goldset
+
+    try:
+        cases = load_goldset(goldset)
+    except Exception as exc:  # noqa: BLE001 — 파일 문제는 여기서 끝난다
+        typer.secho(
+            f"error: could not read goldset: {exc}", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=1) from exc
+    if not cases:
+        typer.secho("error: goldset has no cases", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if mssql:
+        physical, how = _load_and_validate(schema, recover=True)
+    else:
+        physical = _load_schema(ddl=ddl, dsn=dsn, schema=schema)
+        physical = recover_relationships(physical)
+        how = "관계 복구: 스키마만 봄 (데이터 검증 없음)"
+    physical = add_period_anchor(physical)
+
+    chosen = (
+        tuple(int(b) for b in budgets.split(",") if b.strip())
+        if budgets.strip()
+        else tuning.DEFAULT_BUDGETS
+    )
+    typer.secho(
+        f"-- {len(cases)}건 · {len(physical.tables)}표 · {how}",
+        fg=typer.colors.CYAN,
+        err=True,
+    )
+    typer.echo(tuning.render(tuning.curve(physical, cases, budgets=chosen,
+                                          max_hops=max_hops)))
+
+
 @app.command("expand")
 def expand_command(
     sql: Annotated[str, typer.Argument(help="SQL written against the logical models.")],
@@ -195,13 +260,6 @@ def expand_command(
     not just the model definitions. ``--layer`` is therefore an optimisation
     (reuse an approved fold) rather than a substitute for ``--ddl`` / ``--dsn``.
     """
-    if layer_path is not None:
-        typer.secho(
-            "note: --layer is not read yet; the layer is recomputed from the schema",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
-
     result = _run_fold(
         ddl=ddl,
         dsn=dsn,
@@ -215,8 +273,23 @@ def expand_command(
         field_budget=field_budget,
     )
 
+    # 승인된 레이어가 있으면 **그것을** 쓴다. 다시 접으면 설정이 조금만 달라도
+    # 다른 레이어가 나오고, 승인한 것과 다른 계약을 상대로 확장하게 된다.
+    # 물리 그래프는 여전히 스키마에서 온다 — 확장은 실제 테이블이 필요하다.
+    layer = result.layer
+    if layer_path is not None:
+        try:
+            layer = emit.load(layer_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            typer.secho(
+                f"error: could not read --layer: {exc}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1) from exc
+
     try:
-        expansion = expand(sql, result.layer, result.graph, dialect=dialect)
+        expansion = expand(sql, layer, result.graph, dialect=dialect)
     except ExpansionError as exc:
         typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
@@ -337,10 +410,10 @@ def generate_command(
     from tablefold.t2sql import (
         NL2SQL_EXAMPLES,
         GenerationError,
-        fold_star_schema,
         generate_sql,
         recover_relationships,
     )
+    from tablefold.t2sql.prepare import dialect_for_live, prepare_for_questions
     from tablefold.t2sql.trace import enable_logging, render_trace
 
     if verbose or trace_full:
@@ -351,8 +424,7 @@ def generate_command(
     if star:
         if mssql:
             physical, how = _load_and_validate(schema, recover=recover)
-            if dialect == "postgres":
-                dialect = "tsql"
+            dialect = dialect_for_live(dialect)
         else:
             physical = _load_schema(ddl=ddl, dsn=dsn, schema=schema)
             declared = len(physical.foreign_keys)
@@ -362,7 +434,13 @@ def generate_command(
                 f"foreign keys {declared} declared + "
                 f"{len(physical.foreign_keys) - declared} recovered (schema only)"
             )
-        result = fold_star_schema(physical, max_hops=max_hops)
+        # 준비는 **한 벌만** 둔다. 여기서 ``fold_star_schema`` 를 직접 부르면
+        # ``prepare_for_questions`` 가 하는 일(기간 앵커 합성 등)이 빠져서, 화면·
+        # 챗봇과 CLI 가 같은 스키마에 같은 질문을 하고도 다른 레이어를 본다.
+        # 관계 복구는 위에서 이미 마쳤으므로 ``recover=False`` 다.
+        result = prepare_for_questions(
+            physical, recover=False, max_hops=max_hops
+        ).result
         if not result.layer.models:
             typer.secho(
                 "error: 레이어에 모델이 하나도 없다 — 질문할 대상이 없으므로 "

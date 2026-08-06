@@ -193,15 +193,16 @@
             <label class="knob">
               <span class="knob-name">소스</span>
               <select id="sourceSelect">
-                <option value="live">데이터베이스 연결 (확인 중…)</option>
-                <option value="ddl">예제 DDL (retail 53테이블)</option>
+                <option value="live" selected>데이터베이스 연결 (실제 DB 카탈로그)</option>
               </select>
-              <small>기본은 연결된 데이터베이스입니다. 연결이 없으면 예제로 넘어갑니다.</small>
+              <small>연결된 실제 데이터베이스의 카탈로그를 직접 읽어 처리합니다.</small>
             </label>
+
 
             <label class="knob" id="anchorKnob">
               <span class="knob-name">무엇을 중심으로 묶을까</span>
               <select id="anchorSelect">
+                <option value="star">챗봇과 동일 — 질문에 답할 수 있는 구성</option>
                 <option value="mixed">둘 다 — 못 묻는 질문이 없어집니다</option>
                 <option value="fact">거래 기록 중심 — 설명이 가장 짧습니다</option>
                 <option value="dim">기준 정보 중심 — 여러 기록을 나란히</option>
@@ -209,6 +210,7 @@
               <small>
                 거래 기준: 매출 1건이 한 줄. 기준 정보 기준: 조직 1개가 한 줄이고
                 매출·계획·재고가 미리 합쳐져 붙습니다. 둘 다: 설명은 길어지지만 사각지대가 없습니다.
+                챗봇과 동일: 관계를 먼저 되찾은 뒤 접습니다 — 오른쪽 챗봇이 실제로 읽는 구성입니다.
               </small>
             </label>
           </div>
@@ -221,34 +223,41 @@
           <div class="knobs">
             <label class="knob">
               <span class="knob-name">모델 개수 상한</span>
-              <input type="number" id="maxAreas" min="1" max="40" value="6">
+              <input type="number" id="maxAreas" min="1" max="40" value="9">
               <small>이보다 많이 만들지 않습니다. 데이터베이스 소스에서는 자동으로 정해집니다.</small>
             </label>
 
             <label class="knob">
-              <span class="knob-name">전체 필드 예산</span>
-              <input type="number" id="fieldBudget" min="20" max="10000" step="10" value="200">
-              <small>모든 모델이 나눠 쓰는 총 항목 수. 줄이면 설명이 짧아지고 내용도 줄어듭니다.</small>
+              <span class="knob-name">프롬프트 예산 (문자)</span>
+              <input type="number" id="promptBudget" min="1000" max="200000" step="1000" value="24000">
+              <small>설명 전체가 쓸 수 있는 글자 수. AI가 한 번에 읽는 양이고, 이것이 진짜 한계입니다. 비우면 항목 수로 대신 잽니다.</small>
             </label>
 
-            <label class="knob">
+            <label class="knob greedy-only">
               <span class="knob-name">새 모델의 최소 이득</span>
-              <input type="number" id="minGain" min="1" max="10" value="2">
+              <input type="number" id="minGain" min="1" max="10" value="1">
               <small>새 모델이 최소 몇 개의 테이블을 새로 데려와야 만들 가치가 있는지.</small>
             </label>
 
-            <label class="knob">
+            <label class="knob greedy-only">
               <span class="knob-name">테이블당 항목 한도</span>
-              <input type="number" id="maxCost" min="1" max="50" step="1" value="10">
+              <input type="number" id="maxCost" min="1" max="50" step="1" value="15">
               <small>테이블 하나를 새로 품는 데 이보다 많은 항목이 들면 만들지 않습니다.</small>
             </label>
 
-            <label class="knob">
+            <label class="knob greedy-only">
               <span class="knob-name">목표 커버리지</span>
-              <input type="number" id="coverage" min="0.5" max="1" step="0.05" value="0.9">
+              <input type="number" id="coverage" min="0.5" max="1" step="0.05" value="1">
               <small>전체 테이블 중 이만큼 담는 것이 목표. 위 두 한도에 먼저 걸리면 못 채웁니다.</small>
             </label>
+
           </div>
+
+          <p class="adv-note" id="greedyNote" hidden>
+            위 세 값(<b>최소 이득 · 테이블당 한도 · 목표 커버리지</b>)은 지금 앵커
+            방식에서는 <b>아무 일도 하지 않습니다</b>. 어떤 표를 앵커로 삼을지가
+            구조에서 이미 정해져 있어, 고를 여지가 없기 때문입니다.
+          </p>
 
           <div class="ddl-block" id="ddlBlock" hidden>
             <label class="knob-name" for="ddlInput">데이터베이스 정의(DDL)</label>
@@ -256,9 +265,42 @@
           </div>
 
           <div class="adv-actions">
-            <button id="loadSample" class="btn btn-ghost">예제 다시 불러오기</button>
-            <button id="runFold" class="btn btn-primary">다시 묶기</button>
+            <button type="button" id="loadSample" class="btn btn-ghost">예제 다시 불러오기</button>
+            <button type="button" id="runAutoTune" class="btn btn-secondary" style="background: linear-gradient(135deg, #a6e3a1, #26a65b); color: #11111b; font-weight: 700; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer;">⚡ 최적 파라미터 자동 탐색 (Auto-Tune)</button>
+            <button type="button" id="runCurve" class="btn btn-secondary" hidden>📈 예산 대비 답변 곡선</button>
+            <button type="button" id="runFold" class="btn btn-primary">다시 묶기</button>
           </div>
+
+
+          <div id="autotuneProgress" style="margin-top: 15px; background: #11111b; border: 1px solid #313244; padding: 12px 16px; border-radius: 8px;" hidden>
+            <div style="display: flex; justify-content: space-between; font-size: 0.85rem; color: #a6adc8; margin-bottom: 6px;">
+              <span id="autotuneStatusText">📊 AI 파라미터 최적화 탐색 중... [0 / 24 (0%)]</span>
+              <span id="autotuneScoreText" style="color: #a6e3a1; font-weight: 600;">최고 점수: -</span>
+            </div>
+            <div style="background: #181825; border-radius: 6px; height: 10px; overflow: hidden; border: 1px solid #313244;">
+              <div id="autotuneProgressBar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #89b4fa, #a6e3a1); transition: width 0.2s ease;"></div>
+            </div>
+            <div id="autotuneDetailText" style="font-size: 0.78rem; color: #6c7086; margin-top: 6px;">탐색 준비 중...</div>
+          </div>
+
+          <div id="curveBlock" class="curve-block" hidden>
+            <h4>프롬프트 예산 ↔ 답할 수 있는 질문</h4>
+            <p class="adv-note" id="curveNote">
+              설정을 하나 추천하는 대신 <b>곡선</b>을 봅니다. 더 줘도 답이
+              늘지 않는 지점(<b>포화</b>)이 있고, 그 위는 낭비입니다.
+            </p>
+            <table class="curve-table">
+              <thead>
+                <tr>
+                  <th>예산(자)</th><th>실제</th><th>모델</th><th>항목</th>
+                  <th>답변</th><th>주제</th>
+                </tr>
+              </thead>
+              <tbody id="curveBody"></tbody>
+            </table>
+          </div>
+
+
         </div>
 
         <div class="adv-block">

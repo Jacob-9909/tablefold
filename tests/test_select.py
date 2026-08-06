@@ -257,3 +257,75 @@ def test_the_layer_records_who_chose(retail_graph):
 
     assert greedy.selector == "greedy"
     assert llm.selector == "llm"
+
+
+# ── 중복 앵커 제거 ────────────────────────────────────────────────────────────
+
+
+def _candidate(name: str, reach: set[str], inlined: set[str]):
+    from tablefold.choose.select import Candidate
+
+    return Candidate(
+        name=name,
+        role="dimension",
+        score=0.2,
+        reach=frozenset(reach),
+        estimated_fields=20,
+        inlined=frozenset(inlined),
+    )
+
+
+def test_pruning_keeps_the_only_anchor_that_can_group_by_a_table():
+    """도달 가능과 그룹핑 가능은 다르다.
+
+    ``D_CUSTOMER`` 는 ``D_SA_ORG`` 앵커 안에도 들어 있지만, 거기서는 1:N 자식이라
+    컬럼이 ``filter_only`` 로만 나온다 — WHERE 는 되고 GROUP BY 는 안 된다.
+    "거래처별" 질문은 GROUP BY 를 요구하므로 그 앵커로는 답이 없다.
+
+    쌍만 보고 자르면 이 앵커가 조용히 사라지고, 답변가능률은 100% 를 유지한 채로
+    골드셋 BD 4건이 실패한다.
+    """
+    from tablefold.choose.select import _drop_redundant
+
+    sales_org = _candidate(
+        "D_SA_ORG",
+        reach={"d_sa_org", "f_customer_bond", "d_customer"},
+        inlined={"d_sa_org"},
+    )
+    customer = _candidate(
+        "D_CUSTOMER",
+        reach={"d_customer", "d_sa_org"},
+        inlined={"d_customer", "d_sa_org"},
+    )
+
+    kept = {c.name for c in _drop_redundant([sales_org, customer])}
+
+    assert kept == {"D_SA_ORG", "D_CUSTOMER"}
+
+
+def test_pruning_still_drops_an_anchor_that_buys_nothing():
+    """투영까지 봐도 진짜 중복은 중복이다."""
+    from tablefold.choose.select import _drop_redundant
+
+    wide = _candidate(
+        "D_ORG", reach={"d_org", "d_team", "d_dept"}, inlined={"d_org", "d_team"}
+    )
+    narrow = _candidate("D_TEAM", reach={"d_team", "d_org"}, inlined={"d_team"})
+
+    kept = {c.name for c in _drop_redundant([wide, narrow])}
+
+    assert kept == {"D_ORG"}
+
+
+def test_the_lattice_prices_projectable_reach_separately(retail_graph):
+    """``inlined`` 는 그래프에서 나온다 — 앵커 자신 + 다대일로 닿는 표."""
+    from tablefold.choose.cluster import build_lattice
+
+    lattice = build_lattice(retail_graph, profile_tables(retail_graph), max_hops=3)
+    orders = lattice.get("orders")
+
+    assert orders is not None
+    assert "orders" in orders.inlined
+    assert orders.inlined <= orders.reach
+    # 1:N 자식은 집계로만 들어오므로 투영 범위에 없다.
+    assert orders.inlined != orders.reach

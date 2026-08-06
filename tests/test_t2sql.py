@@ -525,3 +525,28 @@ def test_the_shipped_examples_expand_against_the_fixture():
     kept = valid_examples(NL2SQL_EXAMPLES, result.layer, result.graph)
 
     assert kept == NL2SQL_EXAMPLES
+
+
+# ── 방언 ──────────────────────────────────────────────────────────────────────
+
+
+def test_the_live_source_speaks_tsql():
+    """라이브 소스는 MSSQL 이다. 기본값을 그대로 두면 실행이 깨진다.
+
+    화면은 ``postgres`` 로 만들어 MSSQL 에 던졌고, "상위 10개" 질문마다
+    ``Incorrect syntax near 'LIMIT'`` 로 죽었다. CLI 는 ``--mssql`` 에서 방언을
+    바꿔서 ``OFFSET … FETCH NEXT`` 를 냈다 — 같은 질문, 다른 결과.
+    """
+    from tablefold.t2sql.prepare import dialect_for_live
+
+    assert dialect_for_live("postgres") == "tsql"
+    assert dialect_for_live("") == "tsql"
+    assert dialect_for_live() == "tsql"
+
+
+def test_an_explicitly_chosen_dialect_survives():
+    """부르는 쪽이 일부러 고른 방언을 덮어쓰지 않는다."""
+    from tablefold.t2sql.prepare import dialect_for_live
+
+    assert dialect_for_live("duckdb") == "duckdb"
+    assert dialect_for_live("tsql") == "tsql"

@@ -932,3 +932,29 @@ def test_an_unfiltered_child_needs_no_alias():
 
     assert "AS src" not in sql
     assert "accounts" not in sql
+
+
+def test_selecting_a_filter_only_field_says_why(retail_graph):
+    """더 정확한 메시지가 사용자에게 가야 한다.
+
+    ``_reject_unpushable`` 이 먼저 걸려서 "WHERE 에서만 쓸 수 있다"는 일반
+    메시지만 나갔다. ``SELECT`` 에 쓴 사람에게 필요한 말은 "이 필드는 앵커
+    한 행에 대응하는 값이 없다"는 쪽이다.
+    """
+    from tablefold.build.compose import ComposeOptions, compose
+    from tablefold.choose.classify import profile_tables
+    from tablefold.choose.cluster import SelectionPolicy, cluster
+
+    clustering = cluster(
+        retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
+    )
+    layer = compose(
+        retail_graph,
+        clustering,
+        options=ComposeOptions(expose_child_filters=True, field_budget=2000),
+    )
+    model = next(m for m in layer.models if any(f.filter_only for f in m.fields))
+    field = next(f for f in model.fields if f.filter_only)
+
+    with pytest.raises(ExpansionError, match="carry no value at the model's grain"):
+        expand(f"SELECT {field.name} FROM {model.name}", layer, retail_graph)

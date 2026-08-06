@@ -27,13 +27,13 @@ from tablefold.choose.cluster import Clustering
 from tablefold.relate.graph import SchemaGraph
 from tablefold.choose.cost import (
     DEFAULT_FIELD_BUDGET,
-    MAX_MODEL_FIELDS,
     NUMERIC_AGGREGATES,
     aggregatable_columns,
     child_dimension_filters,
     filterable_columns,
     promotable_columns,
 )
+from tablefold.report.prompt import field_cost, layer_overhead, model_overhead
 from tablefold.ir import (
     Cardinality,
     FieldKind,
@@ -56,8 +56,18 @@ class ComposeOptions:
     field_budget: int = DEFAULT_FIELD_BUDGET
     """레이어 **전체**가 쓸 수 있는 필드 수. 모델 하나당이 아니다."""
 
-    max_model_fields: int = MAX_MODEL_FIELDS
-    """모델 하나의 상한. 한 앵커가 예산 전체를 가져가지 못하게 한다."""
+    prompt_budget: int | None = None
+    """레이어 전체가 쓸 수 있는 **문자 수**. 있으면 ``field_budget`` 을 대신한다.
+
+    진짜 제약은 프롬프트 길이(컨텍스트·주의력·비용)이지 필드 수가 아니다.
+    필드 수는 대리 변수이고, 실측에서 필드당 평균 50자였지만 이름과 주석 길이에
+    따라 흔들린다. 편입할 때마다 실제 렌더 길이를 더하면 대리 변수가 사라진다.
+
+    ``max_model_fields`` 는 없앴다. :func:`_allocate` 가 위치 기준으로
+    라운드로빈하므로 한 앵커가 독식할 수 없고, 상한은 라운드로빈 이전의
+    안전장치였다 — 실측에서 200 / 400 / 10000 이 **완전히 같은 레이어**를 냈다
+    (NL2SQL 최대 모델 86필드, retail 최대 62필드로 어느 상한에도 안 닿는다).
+    """
 
     include_foreign_key_columns: bool = False
     include_aggregates: bool = True
@@ -101,6 +111,19 @@ def compose(
         if graph.schema.table(area.anchor) is not None
     )
     notes = tuple(f"uncovered: {name}" for name in clustering.unassigned)
+
+    # 문자 예산이면 레이어 자체 오버헤드(머리말·Tier-2 목록)를 먼저 뺀다. 그것도
+    # 프롬프트에 들어가므로, 안 빼면 편입은 예산을 지켰는데 렌더 결과가 넘친다.
+    budget = opts.prompt_budget
+    if budget is not None:
+        budget -= layer_overhead(
+            len(drafts),
+            clustering.covered_table_count,
+            len(graph.schema.tables),
+            notes,
+        )
+        opts = replace(opts, prompt_budget=max(budget, 0))
+
     return LogicalLayer(
         models=_allocate(drafts, opts),
         source_table_count=len(graph.schema.tables),
@@ -110,6 +133,18 @@ def compose(
         selector=clustering.selector,
         notes=notes,
     )
+
+
+def _interleave(groups: list[list[LogicalField]]) -> list[LogicalField]:
+    """자식별 목록을 라운드로빈으로 섞는다. 각 자식의 첫 통로가 먼저 온다.
+
+    자식 순서대로 이어 붙이면 앞쪽 자식이 통로 열 개를 가져가는 동안 뒤쪽 자식은
+    기간 조건 하나도 못 얻는다 — 그 자식에 대한 "7월 …" 질문이 통째로 답이 안 된다.
+    """
+    merged: list[LogicalField] = []
+    for index in range(max((len(g) for g in groups), default=0)):
+        merged.extend(g[index] for g in groups if index < len(g))
+    return merged
 
 
 @dataclass(frozen=True)
@@ -138,6 +173,8 @@ def _draft(
     assert table is not None  # 호출부에서 보장
 
     candidates: list[tuple[int, LogicalField]] = []
+    own_filters: list[list[LogicalField]] = []
+    dimension_filters: list[list[LogicalField]] = []
     absorbed: set[str] = {table.name}
 
     candidates.extend((0, f) for f in _base_fields(table, graph, opts))
@@ -162,20 +199,77 @@ def _draft(
             absorbed.add(child_table.name)
             # 집계는 2홉 조인보다 앞선다. 자식 행 수가 먼 곳의 라벨보다
             # 답이 되는 경우가 많다.
-            candidates.extend(
-                (2, f) for f in _aggregated_fields(child_table, step, graph, opts)
+            #
+            produced = _aggregated_fields(child_table, step, graph, opts)
+            candidates.extend((2, f) for f in produced if not f.filter_only)
+            # 자기 컬럼 통로(기간·통화)와 차원 통로를 나눠 둔다. 뒤에서 각각
+            # 라운드로빈해야 자식 하나가 차원 통로로 다른 자식의 기간 통로를
+            # 밀어내지 않는다.
+            own_filters.append(
+                [f for f in produced if f.filter_only and len(f.source.path) == 1]
             )
+            dimension_filters.append(
+                [f for f in produced if f.filter_only and len(f.source.path) > 1]
+            )
+
+    # 통로는 **모든 자식의 측정값 뒤**, 그리고 자식 사이에서 **번갈아** 담는다.
+    #
+    # 순위를 따로 주지 않는 이유는 :func:`_allocate` 가 순위가 아니라 *위치* 로
+    # 라운드로빈하기 때문이다. 순위를 뒤로 미루면 예산이 큰 모델들의 측정값에
+    # 전부 쓰이고 통로는 하나도 못 얻는다 — 픽스처에서 ``D_SA_ORG`` 의 기간
+    # 통로가 0개가 되어 "7월 사업장별 매출 계획" 예시가 죽었다. 같은 순위 안에서
+    # 뒤에 두면 모델마다 자기 측정값을 먼저 채우면서도 통로가 굶지 않는다.
+    candidates.extend((2, field) for field in _interleave(own_filters))
+    candidates.extend((2, field) for field in _interleave(dimension_filters))
 
     return _Draft(
         name=name or table.name,
         base_table=table.name,
         absorbed=tuple(sorted(absorbed - {table.name})),
         description=(
-            f"One row per {singular(table.name)}. "
+            f"One row per {_table_label(table) or singular(table.name)}. "
             f"Folds {len(absorbed)} physical tables."
         ),
         candidates=tuple(candidates),
     )
+
+
+# ── 주석 ──────────────────────────────────────────────────────────────────────
+
+
+def _table_label(table: PhysicalTable) -> str | None:
+    """사람이 읽을 테이블 이름. 없으면 ``None``.
+
+    ``singular()`` 를 쓰지 않는다. 영어 복수형 규칙이라 ``F_BS`` 를 ``f_b`` 로,
+    ``F_SALES`` 를 ``f_sale`` 로 자른다 — 웨어하우스 이름은 복수형이 아니다.
+    이름 기반 키 추론은 여전히 ``singular()`` 가 필요하므로 그 함수는 두고,
+    사람이 읽는 자리에서만 주석을 쓴다.
+    """
+    comment = (table.comment or "").strip()
+    # 실측 스키마에 ``(조직코드)`` 처럼 괄호로 싸인 주석이 있다. 그대로 두면
+    # 필드 설명이 ``전사명 ((조직코드))`` 가 된다.
+    while comment.startswith("(") and comment.endswith(")"):
+        comment = comment[1:-1].strip()
+    if not comment or comment.lower() == table.name.lower():
+        return None
+    return comment
+
+
+def _describe(column: PhysicalColumn, table: PhysicalTable) -> str | None:
+    """인라인·집계로 앵커 위에 올라온 컬럼의 설명.
+
+    컬럼 주석은 컬럼만 설명하고 소속 테이블은 설명하지 않는다. 실측 스키마에서
+    ``D_FI_ORG.COMPANY_NM`` 과 ``D_ORG.COMPANY_NM`` 의 주석이 둘 다 "전사명"이라,
+    앵커 위에 나란히 올라오면 어느 조직 체계인지 구분할 근거가 사라졌다. 구분
+    정보는 테이블 주석("D_재무조직" / "D_영업조직")에 있으므로 함께 싣는다.
+    """
+    label = _table_label(table)
+    comment = (column.comment or "").strip() or None
+    if label is None:
+        return comment
+    # 컬럼 주석이 없을 때 라벨만 남기면 그 라벨이 컬럼의 *뜻* 처럼 읽힌다
+    # (``HEAD_CD — D_재무조직``). 괄호로 싸서 출처 표기임을 분명히 한다.
+    return f"{comment} ({label})" if comment else f"({label})"
 
 
 # ── field builders ────────────────────────────────────────────────────────────
@@ -230,7 +324,7 @@ def _joined_fields(
                 column=column.name,
                 path=path,
             ),
-            description=column.comment,
+            description=_describe(column, table),
         )
         for column in promotable_columns(table, graph, drop_primary_key=True)
     ]
@@ -241,6 +335,7 @@ def _aggregated_fields(
 ) -> list[LogicalField]:
     """자식 테이블을 부모 입도의 측정값으로 축소한다."""
     prefix = plural(table.name)
+    source = _table_label(table) or table.name
 
     fields: list[LogicalField] = [
         LogicalField(
@@ -253,7 +348,7 @@ def _aggregated_fields(
                 path=(step,),
                 aggregate="count",
             ),
-            description=f"Number of {table.name} rows for this row.",
+            description=f"Number of {source} rows for this row.",
         )
     ]
 
@@ -271,6 +366,7 @@ def _aggregated_fields(
                         path=(step,),
                         aggregate=aggregate,
                     ),
+                    description=_describe(column, table),
                 )
             )
 
@@ -294,6 +390,7 @@ def _filter_fields(
     """
     # 어느 컬럼이 필터가 되는지의 규칙은 ``cost`` 에 한 벌만 둔다. 선택 단계가
     # 후보 가격을 매길 때 같은 규칙을 읽어야 추정과 실제가 어긋나지 않는다.
+    source = _table_label(table) or table.name
     fields = [
         LogicalField(
             name=f"{prefix}_{column.name}",
@@ -304,7 +401,10 @@ def _filter_fields(
                 column=column.name,
                 path=(step,),
             ),
-            description=f"Filters the {table.name} rows folded into this row.",
+            description=(
+                f"{(column.comment or '').strip() or column.name} — "
+                f"{source} 행을 거르는 조건"
+            ),
             filter_only=True,
         )
         for column in filterable_columns(table, graph, step, measures)
@@ -314,7 +414,11 @@ def _filter_fields(
     # "매출액 계정만" 은 ``F_PL`` 이 아니라 ``D_PL_ACCT.PL_ACCT2_NM`` 의 이야기다.
     # 경로를 두 단으로 두면 ``expand`` 가 집계 서브쿼리 안에서 그 차원까지 조인해
     # 조건을 건다.
-    for dim_name, columns in child_dimension_filters(table, graph):
+    # ``step`` 은 1:N 이므로 출발점이 앵커다. 자식이 앵커를 되가리키는 통로는
+    # 앵커에 이미 있는 값이라 새 자리가 아니다.
+    for dim_name, columns in child_dimension_filters(
+        table, graph, anchor=step.from_table
+    ):
         dim_step = next(
             (
                 JoinStep(
@@ -331,6 +435,8 @@ def _filter_fields(
         )
         if dim_step is None:
             continue
+        dim_table = graph.schema.table(dim_name)
+        dim_label = (dim_table and _table_label(dim_table)) or dim_name
         fields.extend(
             LogicalField(
                 name=f"{prefix}_{column.name}",
@@ -342,7 +448,8 @@ def _filter_fields(
                     path=(step, dim_step),
                 ),
                 description=(
-                    f"Filters the {table.name} rows by {dim_name}.{column.name}."
+                    f"{(column.comment or '').strip() or column.name} — "
+                    f"{source} 행을 {dim_label} 기준으로 거르는 조건"
                 ),
                 filter_only=True,
             )
@@ -357,11 +464,15 @@ def _filter_fields(
 def _allocate(
     drafts: tuple[_Draft, ...], opts: ComposeOptions
 ) -> tuple[LogicalModel, ...]:
-    """레이어의 필드 예산을 모든 모델에 한 번에 배분한다.
+    """레이어의 예산을 모든 모델에 한 번에 배분한다.
 
     편입 순서는 우선순위 — 모든 모델의 자체 컬럼, 다음이 1홉 조인과 자식 집계,
     그다음이 더 먼 조인. 같은 우선순위 안에서는 모델들이 번갈아 가져가므로,
     후보가 200개인 모델이 작은 모델이 자기를 설명하기도 전에 예산을 비우지 못한다.
+
+    ``prompt_budget`` 이 있으면 **문자로** 센다. 필드 수는 대리 변수일 뿐이고,
+    진짜 제약은 프롬프트 길이다 — 실측에서 필드 하나가 평균 50자였지만 이름과
+    주석 길이에 따라 흔들린다.
     """
     resolved = [_deduplicate(d.candidates) for d in drafts]
 
@@ -376,13 +487,21 @@ def _allocate(
 
     kept: list[list[LogicalField]] = [[] for _ in drafts]
     spent = 0
+    opened: set[int] = set()
     for _, _, index, fld in queue:
-        if spent >= opts.field_budget:
-            break
-        if len(kept[index]) >= opts.max_model_fields:
-            continue
+        if opts.prompt_budget is not None:
+            cost = field_cost(fld)
+            if index not in opened:
+                cost += model_overhead(drafts[index].name, drafts[index].description)
+            if spent + cost > opts.prompt_budget:
+                break
+            spent += cost
+            opened.add(index)
+        else:
+            if spent >= opts.field_budget:
+                break
+            spent += 1
         kept[index].append(fld)
-        spent += 1
 
     return tuple(
         LogicalModel(
@@ -404,16 +523,46 @@ def _deduplicate(
     seen: set[str] = set()
 
     for priority, field in sorted(candidates, key=lambda pair: pair[0]):
-        name = field.name
-        if name.lower() in seen:
-            name = _disambiguate(field)
-            if name.lower() in seen:
-                continue
+        name = _resolve_name(field, seen)
+        if name is None:
+            continue
+        if name != field.name:
             field = replace(field, name=name)
         seen.add(name.lower())
         kept.append((priority, field))
 
     return kept
+
+
+def _resolve_name(field: LogicalField, seen: set[str]) -> str | None:
+    """이 필드가 쓸 이름. 어떻게 해도 겹치면 ``None``.
+
+    예전에는 :func:`_disambiguate` 가 만든 이름도 겹치면 필드를 **조용히
+    버렸다.** 실측에서 조직 차원이 셋인데 셋 다 ``ORG_CD`` 로 닿아 역할 이름이
+    전부 ``org`` 로 같았고, 세 번째 차원의 컬럼이 레이어에서 사라졌다 — 로그도
+    ``notes`` 도 남지 않으니 읽는 쪽은 그 컬럼이 원래 없는 줄 안다.
+
+    그래서 값을 담는 필드는 마지막에 출처 테이블로 한정한다. ``d_sa_org_HEAD_NM``
+    은 예쁘지 않지만, 있는 컬럼을 없다고 말하는 것보다 낫다.
+
+    **필터 전용 필드는 예외로 버린다.** 그쪽은 값이 아니라 통로다. 자식마다
+    차원마다 하나씩 생기므로 한정 이름까지 살리면 곱으로 늘어난다 — 실측에서
+    조직 차원 3개 × 컬럼 4개 × 자식 10개가 전부 살아나 예산을 먹었고, 정작
+    ``f_sales_SALES_AMT_sum`` 같은 집계가 밀려나 질의가 "모르는 필드"로 거부됐다.
+    통로 하나를 잃는 것과 답 자체를 잃는 것은 무게가 다르다.
+    """
+    names = [field.name, _disambiguate(field)]
+    if not field.filter_only:
+        names.append(_qualified(field))
+    for candidate in names:
+        if candidate.lower() not in seen:
+            return candidate
+    return None
+
+
+def _qualified(field: LogicalField) -> str:
+    """출처 테이블로 한정한 이름. 이름 충돌의 마지막 수단."""
+    return f"{field.source.table.lower()}_{field.name}"
 
 
 # 참조 컬럼 이름에서 떼면 역할만 남는 꼬리표. ``seller_id`` → ``seller``.

@@ -43,7 +43,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   await discoverSources();
   await loadSample({ silent: true });
   runFold();
+  runAutoTune();
 });
+
+
 
 /** 연결된 데이터베이스가 있으면 그것을 기본으로, 없으면 예제로 내려앉는다. */
 async function discoverSources() {
@@ -80,14 +83,98 @@ function syncSourceUI() {
     : "위에 붙여 넣은 정의문(DDL)을 읽습니다.";
 }
 
+// 골드셋이 있어야 곡선을 잴 수 있다. 없는 설치에서는 버튼을 숨긴다 —
+// 눌러도 404 가 나는 버튼을 보여 주는 것보다 낫다.
+async function syncCurveButton() {
+  const btn = $("runCurve");
+  if (!btn) return;
+  try {
+    const info = await (await fetch("/api/goldset")).json();
+    btn.hidden = !info.available;
+    if (info.available) {
+      btn.title = `${info.name} — ${info.cases}건 · 주제 ${info.subjects}개`;
+    }
+  } catch (e) {
+    btn.hidden = true;
+  }
+}
+
+async function runCurve() {
+  const btn = $("runCurve");
+  const block = $("curveBlock");
+  const body = $("curveBody");
+  if (!btn || !block || !body) return;
+
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "재는 중...";
+  try {
+    const res = await fetch("/api/curve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(readSettings()),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+
+    body.innerHTML = "";
+    for (const p of data.points) {
+      const row = document.createElement("tr");
+      if (p.prompt_budget === data.knee) row.className = "is-knee";
+      const cells = [
+        p.prompt_budget.toLocaleString(),
+        p.prompt_length.toLocaleString(),
+        p.models,
+        p.fields,
+        `${p.answered}/${p.total}`,
+        `${p.answered_subjects}/${p.total_subjects}`,
+      ];
+      for (const value of cells) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        row.appendChild(td);
+      }
+      // 곡선의 한 점을 그대로 적용할 수 있어야 곡선이 결정으로 이어진다.
+      const apply = document.createElement("td");
+      apply.className = "curve-apply";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = p.prompt_budget === data.knee ? "포화 · 적용" : "적용";
+      button.addEventListener("click", () => {
+        $("promptBudget").value = p.prompt_budget;
+        runFold();
+      });
+      apply.appendChild(button);
+      row.appendChild(apply);
+      body.appendChild(row);
+    }
+    block.hidden = false;
+  } catch (e) {
+    showToast("곡선 측정 실패");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
 function bindEvents() {
+  syncGreedyKnobs();
+  syncCurveButton();
+  if ($("runCurve")) $("runCurve").addEventListener("click", runCurve);
   $("sourceSelect").addEventListener("change", () => {
     syncSourceUI();
+    syncGreedyKnobs();
     runFold();
   });
-  $("anchorSelect").addEventListener("change", runFold);
+  $("anchorSelect").addEventListener("change", () => {
+    syncGreedyKnobs();
+    runFold();
+  });
   $("loadSample").addEventListener("click", () => loadSample());
   $("runFold").addEventListener("click", runFold);
+  if ($("runAutoTune")) {
+    $("runAutoTune").addEventListener("click", runAutoTune);
+  }
   $("runExpand").addEventListener("click", runExpand);
   $("copySql").addEventListener("click", copySql);
 
@@ -100,8 +187,124 @@ function bindEvents() {
   });
 }
 
+async function runAutoTune(e) {
+  if (e) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  const details = document.querySelector("details.advanced");
+  if (details) details.open = true;
+
+  const btn = $("runAutoTune");
+  if (!btn) return;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "⚡ AI 파라미터 최적화 탐색 중...";
+
+
+  const progressBox = $("autotuneProgress");
+  const statusText = $("autotuneStatusText");
+  const scoreText = $("autotuneScoreText");
+  const progressBar = $("autotuneProgressBar");
+  const detailText = $("autotuneDetailText");
+
+  if (progressBox) progressBox.hidden = false;
+  if (progressBar) progressBar.style.width = "0%";
+  if (statusText) statusText.textContent = "📊 AI 파라미터 최적화 탐색 준비 중... [0 / 24]";
+  if (scoreText) scoreText.textContent = "최고 점수: -";
+  if (detailText) detailText.textContent = "탐색 시작...";
+
+  try {
+    const payload = {
+      source: $("sourceSelect").value,
+      ddl: $("ddlInput") ? $("ddlInput").value : ""
+    };
+    const res = await fetch("/api/autotune", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      if (progressBox) progressBox.hidden = true;
+      showToast("자동 탐색 실패 (서버 오류)");
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let finalResult = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const item = JSON.parse(line);
+          if (item.event === "progress") {
+            if (statusText) statusText.textContent = `📊 AI 파라미터 최적화 탐색 중... [${item.current} / ${item.total} (${item.pct}%)]`;
+            if (progressBar) progressBar.style.width = `${item.pct}%`;
+            if (scoreText && item.current_best_score > 0) scoreText.textContent = `최고 점수: ${item.current_best_score}/100`;
+            if (detailText) detailText.textContent = `측정 조건: ${item.evaluating}`;
+          } else if (item.event === "done") {
+            finalResult = item.result;
+          }
+        } catch (e) {
+          console.error("JSON parse error:", e);
+        }
+      }
+    }
+
+    btn.disabled = false;
+    btn.textContent = originalText;
+
+    if (finalResult) {
+      // 앵커 모드를 먼저 맞춘다. 스칼라 다섯 개로는 스타 프리셋을 재현할 수 없다 —
+      // 다른 셀렉터이지 같은 셀렉터의 다른 설정이 아니다. 이 줄이 없던 동안
+      // 화면은 스타 프리셋의 점수를 띄운 뒤 탐욕 폴드를 그렸다.
+      if (finalResult.anchor_mode) {
+        $("anchorSelect").value = finalResult.anchor_mode;
+      }
+      $("maxAreas").value = finalResult.max_areas;
+      // 문자 예산으로 넣는다. 이긴 레이어가 실제로 찍은 길이라 그대로 재현된다 —
+      // 필드 수로 되돌리면 이름·주석 길이 차이만큼 어긋난다.
+      if (finalResult.prompt_budget) $("promptBudget").value = finalResult.prompt_budget;
+      $("minGain").value = finalResult.min_gain;
+      $("maxCost").value = finalResult.max_cost;
+      $("coverage").value = finalResult.coverage;
+
+      if (progressBar) progressBar.style.width = "100%";
+      if (statusText) statusText.textContent = `✅ 파라미터 최적화 탐색 완료 [24 / 24 (100%)]`;
+      if (scoreText) scoreText.textContent = `최종 최고 점수: ${finalResult.score}/100`;
+      if (detailText) detailText.textContent = finalResult.reason;
+
+      showToast(`🎯 최적 파라미터 적용 완료! (점수 ${finalResult.score}/100) — ${finalResult.reason}`);
+      runFold();
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    if (progressBox) progressBox.hidden = true;
+    showToast("네트워크 오류: " + err.message);
+  }
+}
+
+
+
 function readSettings() {
   const source = $("sourceSelect").value;
+  // 프롬프트 예산은 문자 수다. 필드 수는 대리 변수일 뿐이고, 실제 제약은 AI가
+  // 한 번에 읽는 길이다 — 비워 두면 서버가 항목 수로 대신 잰다.
+  const promptBudget = parseInt($("promptBudget").value, 10);
   return {
     ddl: source === "ddl" ? $("ddlInput").value : "",
     source,
@@ -109,9 +312,25 @@ function readSettings() {
     coverage: parseFloat($("coverage").value),
     min_gain: parseInt($("minGain").value, 10),
     max_cost: parseFloat($("maxCost").value),
-    field_budget: parseInt($("fieldBudget").value, 10),
+    prompt_budget: Number.isFinite(promptBudget) ? promptBudget : null,
     max_areas: parseInt($("maxAreas").value, 10),
   };
+}
+
+// 탐욕 선택기에서만 작동하는 노브. 앵커를 이름으로 지목하는 모드(star/mixed/dim/
+// fact)에서는 고를 여지가 없어 돌려도 아무것도 안 바뀐다. 안 알려 주면 사용자는
+// "값을 바꿨는데 결과가 그대로"인 이유를 알 방법이 없다.
+function syncGreedyKnobs() {
+  const source = $("sourceSelect").value;
+  const mode = source === "live" ? $("anchorSelect").value : "auto";
+  const inert = mode !== "auto";
+  document.querySelectorAll(".greedy-only").forEach((el) => {
+    el.classList.toggle("is-inert", inert);
+    const input = el.querySelector("input");
+    if (input) input.disabled = inert;
+  });
+  const note = $("greedyNote");
+  if (note) note.hidden = !inert;
 }
 
 async function loadSample({ silent = false } = {}) {
@@ -215,8 +434,13 @@ function renderHeadline(data) {
   // 하는데(기준 정보 중심으로 묶으면 그렇다), 그 대가로 못 묻던 질문이 답이 된다.
   // "설명 +256%" 만 크게 보이면 나빠진 것처럼 보이지만 실제로는 사각지대가
   // 사라진 것이다. 그래서 길이는 아래 한 줄로 내리고 여기엔 답변 가능률을 둔다.
+  //
+  // 두 지표 중 **낮은 쪽**을 쓴다. 둘은 서로 다른 방식으로 답을 막고, 어느 쪽이든
+  // 막히면 그 질문은 답이 없다. 쌍만 보고 100% 를 크게 띄우던 동안 실제 생성은
+  // 10/15 였다 — 거래처와 계정 속성이 조건으로만 걸려 "…별" 질문이 전부 죽었다.
   const fid = data.fidelity;
-  const answerable = Math.round(fid.pair_answerability * 100);
+  const groupRate = fid.table_groupability ?? 1;
+  const answerable = Math.round(Math.min(fid.pair_answerability, groupRate) * 100);
   $("sizeDelta").textContent = `${answerable}%`;
   $("sizeDelta").className = `ba-gain-num ${
     answerable >= 80 ? "good" : answerable >= 50 ? "warn" : ""

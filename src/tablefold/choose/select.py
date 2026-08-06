@@ -76,6 +76,17 @@ class SelectionPolicy:
 
     ``max_areas`` is a safety valve, not the plan. Left at ``None`` the model
     count is an output of the objective rather than an input to it.
+
+    **이 값들은 :class:`GreedySelector` 에만 작용한다.** 스타 프리셋
+    (:func:`~tablefold.t2sql.preset.fold_star_schema`)은 :class:`ExplicitSelector`
+    로 앵커를 구조에서 정하고 ``prune_redundant`` 로 중복만 뺀다 — 거기서
+    ``coverage_target`` · ``min_gain`` · ``max_fields_per_table`` 은 아무 일도
+    하지 않는다. 화면과 CLI 가 이 셋을 노출하면 "돌려도 아무것도 안 바뀐다"는
+    노브를 보여 주게 된다.
+
+    그리고 이 노브들이 존재하는 근본 이유는 **목적함수의 부재**다. 골드셋이 있으면
+    :mod:`tablefold.choose.tune` 이 프롬프트 길이 ↔ 답변 수의 교환곡선을 직접
+    재므로, 대리 지표를 튜닝할 이유가 사라진다.
     """
 
     coverage_target: float = 0.90
@@ -111,6 +122,32 @@ class Candidate:
     score: float
     reach: frozenset[str]
     estimated_fields: int
+
+    inlined: frozenset[str] = frozenset()
+    """``reach`` 중 **컬럼을 값으로 꺼낼 수 있는** 표. 앵커 자신과 다대일로 닿는
+    표들이다.
+
+    ``reach`` 와 나누는 이유는 1:N 자식이다. 자식도 흡수되지만 집계로만 들어오므로
+    그 표의 속성 컬럼은 ``filter_only`` 가 된다 — WHERE 는 되고 SELECT/GROUP BY 는
+    안 된다. "거래처별", "계정별" 같은 질문은 GROUP BY 를 요구하므로, 그 표가
+    투영 가능한 앵커가 하나도 없으면 답할 방법이 없다.
+
+    비워 두면 :func:`_drop_redundant` 가 투영 조건을 보지 않는다 — 이 값을 채우지
+    않는 호출자의 동작은 예전과 같다.
+    """
+
+    provides_grain: bool = False
+    """이 앵커가 다른 앵커에 없는 **입도**를 들고 온다. 중복 판정에서 면제된다.
+
+    :func:`_drop_redundant` 는 흡수하는 *테이블 조합* 만 본다. 그래서 같은 팩트들을
+    담는 두 앵커를 같은 것으로 본다 — 실측에서 ``V_PERIOD`` (월 입도)가 ``D_ORG``
+    (조직 입도)에 흡수됐다고 판정되어 잘렸다. 둘의 조합은 같지만 답하는 질문은
+    다르다. "조직별 매출 대 계획"과 "월별 매출 대 계획"은 서로를 대신하지 못한다.
+
+    제대로 고치려면 판정을 테이블이 아니라 **투영 가능한 컬럼** 단위로 내려야
+    한다. 지금은 근거가 확실한 경우 — 그 입도를 가진 물리 테이블이 아예 없어서
+    합성한 가상 앵커 — 만 면제한다. 넓은 결함은 그대로 남아 있다.
+    """
 
     @property
     def fields_per_table(self) -> float:
@@ -264,13 +301,21 @@ def _pairs_of(candidate: Candidate) -> set[frozenset[str]]:
 
 
 def _drop_redundant(candidates: list[Candidate]) -> list[Candidate]:
-    """조합도 테이블도 새로 데려오지 않는 앵커를 뺀다.
+    """조합도 테이블도 투영도 새로 데려오지 않는 앵커를 뺀다.
 
     작게 기여하는 것부터 빼 본다. 크게 기여하는 앵커를 먼저 빼면 그 자리를
     작은 것 여럿이 메우게 되어 결과가 커진다.
 
-    쌍만 보면 안 된다. 이웃이 하나도 없는 테이블은 어떤 쌍에도 안 들어가므로,
-    그 테이블을 유일하게 담은 앵커가 조용히 사라진다. 커버리지도 함께 본다.
+    세 가지를 함께 본다. 하나라도 빠뜨리면 조용히 답을 잃는다:
+
+    * **쌍** — 이 앵커가 한 모델에 함께 놓는 테이블 조합.
+    * **테이블** — 이웃이 하나도 없는 테이블은 어떤 쌍에도 안 들어가므로, 그
+      테이블을 유일하게 담은 앵커가 쌍만 보면 사라진다.
+    * **투영** — 흡수됐다고 답할 수 있는 것이 아니다. 1:N 자식으로만 흡수된 표는
+      컬럼이 ``filter_only`` 로 나와 GROUP BY 에 못 쓴다. NL2SQL 골드셋에서
+      ``D_CUSTOMER`` · ``D_PL_ACCT`` · ``D_BS_ACCT`` 앵커가 정확히 이 이유로
+      잘렸고, "거래처별" · "계정별" 질문 6건이 통째로 실패했다. 답변가능률은
+      그동안 100% 를 보고했다.
     """
     if len(candidates) <= 1:
         return candidates
@@ -280,12 +325,19 @@ def _drop_redundant(candidates: list[Candidate]) -> list[Candidate]:
 
     kept = list(candidates)
     for candidate in order:
+        if candidate.provides_grain:
+            continue
         rest = [c for c in kept if c.name != candidate.name]
         if not rest:
             break
         covers_pairs = set().union(*(pairs[c.name] for c in rest))
         covers_tables = set().union(*(c.reach for c in rest))
-        if pairs[candidate.name] <= covers_pairs and candidate.reach <= covers_tables:
+        covers_inlined = set().union(*(c.inlined for c in rest))
+        if (
+            pairs[candidate.name] <= covers_pairs
+            and candidate.reach <= covers_tables
+            and candidate.inlined <= covers_inlined
+        ):
             kept = rest
 
     # 입력 순서를 지킨다. 호출자가 준 순서에 뜻이 있을 수 있다.

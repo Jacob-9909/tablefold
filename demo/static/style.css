@@ -1038,3 +1038,20 @@ table.data code {
   font-weight: 700;
   fill: var(--aggregated);
 }
+
+/* 지금 앵커 방식에서 아무 일도 하지 않는 노브.
+   숨기지 않고 흐리게만 둔다 — 사라지면 "있던 게 없어졌다"로 읽히고,
+   그대로 두면 "돌렸는데 왜 안 바뀌지"가 된다. */
+.knob.is-inert { opacity: .45; }
+.knob.is-inert input { cursor: not-allowed; }
+
+/* 예산 대비 답변 곡선. 설정 하나가 아니라 교환곡선을 보여 주는 자리다. */
+.curve-block { margin-top: 15px; }
+.curve-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.curve-table th,
+.curve-table td { padding: 6px 8px; text-align: right; border-bottom: 1px solid #313244; }
+.curve-table th { color: #a6adc8; font-weight: 600; }
+.curve-table tr.is-knee td { color: #a6e3a1; font-weight: 700; }
+.curve-table td.curve-apply { text-align: left; }
+.curve-apply button { background: none; border: 1px solid #45475a; color: inherit;
+  border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: .78rem; }

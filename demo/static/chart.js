@@ -398,11 +398,15 @@
     const colRet = fidelity.column_retention ?? 0;
     const joinAbs = fidelity.join_absorption ?? 0;
     const pairAns = fidelity.pair_answerability ?? 0;
+    const groupable = fidelity.groupable_tables || [];
+    const ungroupable = fidelity.ungroupable || [];
+    const groupRate = fidelity.table_groupability ?? 0;
     const counts = fidelity.counts || {};
 
     const colColor = getGaugeColor(colRet);
     const joinColor = getGaugeColor(joinAbs);
     const pairColor = getGaugeColor(pairAns);
+    const groupColor = getGaugeColor(groupRate);
 
     // 2-1. 게이지 바 HTML 조립
     let html = `
@@ -440,10 +444,10 @@
           <span class="gauge-desc">${num(counts.total_edges)}개 관계 중 ${num(counts.absorbed_edges)}개가 모델 안으로</span>
         </div>
 
-        <!-- 3. 답변 가능 -->
+        <!-- 3. 함께 읽기 -->
         <div class="fidelity-gauge-card">
           <div class="gauge-header">
-            <span class="gauge-label">답변 가능</span>
+            <span class="gauge-label">함께 읽기</span>
             <span class="gauge-val" style="color:${pairColor}">${(pairAns * 100).toFixed(1)}%</span>
           </div>
           <div class="gauge-bar-track">
@@ -451,8 +455,34 @@
           </div>
           <span class="gauge-desc">${num(counts.askable_pairs)}쌍 중 ${num(counts.answerable_pairs)}쌍을 조인 없이</span>
         </div>
+
+        <!-- 4. 그룹 가능 -->
+        <div class="fidelity-gauge-card">
+          <div class="gauge-header">
+            <span class="gauge-label">그룹 가능</span>
+            <span class="gauge-val" style="color:${groupColor}">${(groupRate * 100).toFixed(1)}%</span>
+          </div>
+          <div class="gauge-bar-track">
+            <div class="gauge-bar-fill" style="width:${Math.min(100, groupRate * 100)}%; background:${groupColor};"></div>
+          </div>
+          <span class="gauge-desc">흡수된 ${num(
+            groupable.length + ungroupable.length
+          )}표 중 ${num(groupable.length)}표를 GROUP BY 할 수 있음</span>
+        </div>
       </div>
     `;
+
+    // "…별" 질문이 못 닿는 표. 흡수는 됐지만 WHERE 로만 걸 수 있다.
+    if (ungroupable.length > 0) {
+      html += `
+        <details class="fidelity-details">
+          <summary>GROUP BY 할 수 없는 표 ${ungroupable.length}개 — WHERE 로만 걸 수 있음</summary>
+          <div class="chip-cloud">${ungroupable
+            .map((t) => `<span class="chip-item">${esc(t)}</span>`)
+            .join("")}</div>
+        </details>
+      `;
+    }
 
     // 2-2. 조인 없이 답할 수 없는 조합 목록 (<details> 접기)
     const unanswerable = fidelity.unanswerable || [];

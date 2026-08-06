@@ -13,13 +13,23 @@
 * **조인 흡수율** — 물리 FK 엣지 중 양 끝이 한 모델 안에 함께 들어간 비율.
   흡수되지 않은 엣지는 읽는 쪽이 여전히 직접 조인해야 하는 자리다.
 
-* **질문 가능 쌍 대비 답변 가능 쌍** — 이게 핵심이다. 스키마를 얼마나 담았느냐가
-  아니라 *무엇을 물을 수 있느냐*를 잰다. 그래프에서 서로 가까운(=한 질문에 함께
-  등장할 법한) 테이블 쌍 중, 조인 없이 한 모델만 읽어서 답할 수 있는 쌍의 비율이다.
+* **함께 읽을 수 있는 쌍** — 그래프에서 서로 가까운(=한 질문에 함께 등장할 법한)
+  테이블 쌍 중, 조인 없이 한 모델만 읽어서 닿을 수 있는 쌍의 비율이다.
 
   팩트를 앵커로 삼은 레이어가 골드셋에서 팩트 간 질문 12건을 거부한 이유가 정확히
   이 수치에 잡힌다. ``F_SALES`` 와 ``F_MGMT_PLAN`` 은 ``D_SA_ORG`` 를 사이에 두고
   거리 2라 분모에 들어가지만, 어느 모델도 둘을 함께 담지 않아 분자에서 빠진다.
+
+  **이 수치는 "답할 수 있다"가 아니다.** 흡수 여부만 본다. 이름을 그렇게 붙여
+  뒀던 동안 NL2SQL 레이어는 100% 를 보고했고 실제 생성은 10/15 였다.
+
+* **그룹 가능한 테이블** — 앞의 수치가 놓치는 것을 잰다. 어떤 표가 1:N 자식으로만
+  흡수되면 그 컬럼은 ``filter_only`` 로 나온다 — WHERE 는 되고 SELECT/GROUP BY 는
+  안 된다. "거래처별", "계정별" 은 GROUP BY 를 요구하므로 그런 표는 흡수돼 있어도
+  질문에 답하지 못한다.
+
+  골드셋 실패 6건이 전부 여기였다: ``D_CUSTOMER`` · ``F_PL`` · ``F_BS`` 의 속성이
+  어느 모델에서도 투영되지 않았다.
 
 * **팬아웃 방어 수** — 집계로 접힌 1:N 자식의 수. 인라인했다면 앵커의 행이 불어나
   모든 합계가 조용히 틀어졌을 자리들이다.
@@ -33,7 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tablefold.choose.cost import is_noise
-from tablefold.ir import Cardinality, LogicalLayer
+from tablefold.ir import Cardinality, FieldKind, LogicalLayer
 from tablefold.relate.graph import SchemaGraph
 
 DEFAULT_QUESTION_HOPS = 2
@@ -104,8 +114,17 @@ class Fidelity:
 
     unanswerable_total: int
 
-    fanout_guarded: int
-    question_hops: int
+    groupable_tables: tuple[str, ...] = ()
+    """어떤 모델에서든 ``GROUP BY`` 에 쓸 수 있는 컬럼이 하나라도 나오는 물리 표.
+
+    집계 필드는 세지 않는다 — ``SUM(SALES_AMT)`` 은 값이지 묶는 기준이 아니다.
+    """
+
+    ungroupable: tuple[str, ...] = ()
+    """모델에 흡수됐지만 ``filter_only`` 로만 나오는 표. 레이어의 진짜 사각지대다."""
+
+    fanout_guarded: int = 0
+    question_hops: int = DEFAULT_QUESTION_HOPS
 
     @property
     def column_retention(self) -> float:
@@ -127,9 +146,26 @@ class Fidelity:
 
     @property
     def pair_answerability(self) -> float:
+        """조인 없이 **함께 읽을 수 있는** 쌍의 비율. 답할 수 있는 비율이 아니다.
+
+        이름은 호환을 위해 남긴다. 무엇을 재는지는 :attr:`table_groupability` 와
+        나란히 봐야 알 수 있다.
+        """
         if not self.askable_pairs:
             return 1.0
         return self.answerable_pairs / self.askable_pairs
+
+    @property
+    def table_groupability(self) -> float:
+        """흡수된 표 중 ``GROUP BY`` 에 쓸 수 있는 비율.
+
+        분모는 전체 표가 아니라 **흡수된** 표다. 아예 안 담긴 표는 커버리지가
+        따로 세므로, 여기서 또 세면 같은 결손을 두 번 벌하게 된다.
+        """
+        absorbed = len(self.groupable_tables) + len(self.ungroupable)
+        if not absorbed:
+            return 1.0
+        return len(self.groupable_tables) / absorbed
 
 
 def measure(
@@ -141,6 +177,7 @@ def measure(
 ) -> Fidelity:
     """레이어가 물리 스키마를 얼마나 대변하는지 잰다."""
     members = _members_by_model(layer)
+    projected = _projected_by_model(layer)
     exposed = _exposed_columns(layer)
     key_columns = _key_columns(graph)
 
@@ -171,7 +208,7 @@ def measure(
                 dropped_values=lost_values,
                 dropped_noise=lost_noise,
                 in_models=tuple(
-                    name for name, group in members.items() if low in group
+                    name for name, group in projected.items() if low in group
                 ),
             )
         )
@@ -183,8 +220,13 @@ def measure(
 
     absorbed, edge_total = _edge_absorption(graph, members)
     askable = _askable_pairs(graph, hops=question_hops)
-    answerable = {p for p in askable if any(p <= group for group in members.values())}
+    # 쌍은 **투영된** 표로 센다. 두 표가 한 모델에 흡수됐어도 한쪽 컬럼이 전부
+    # 잘려 나갔으면 그 쌍을 함께 읽을 방법이 없다.
+    answerable = {p for p in askable if any(p <= group for group in projected.values())}
     missed = sorted(askable - answerable)
+
+    in_models = set().union(*projected.values()) if projected else set()
+    groupable = _groupable_tables(layer) & in_models
 
     return Fidelity(
         tables=tuple(tables),
@@ -199,6 +241,8 @@ def measure(
         answerable_pairs=len(answerable),
         unanswerable=tuple(tuple(sorted(p)) for p in missed[:max_unanswerable]),  # type: ignore[misc]
         unanswerable_total=len(missed),
+        groupable_tables=tuple(sorted(groupable)),
+        ungroupable=tuple(sorted(in_models - groupable)),
         fanout_guarded=_fanout_guarded(layer),
         question_hops=question_hops,
     )
@@ -208,9 +252,34 @@ def measure(
 
 
 def _members_by_model(layer: LogicalLayer) -> dict[str, frozenset[str]]:
+    """조인 경로가 닿는 표. **엣지 흡수** 를 재는 데 쓴다.
+
+    2홉 경로의 중간 표는 컬럼이 하나도 안 남아도 조인은 실제로 일어난다 —
+    ``orders → customers → tiers`` 에서 ``tier_label`` 만 살아남아도 두 엣지가
+    모두 모델 안에서 소비된다. 그래서 엣지를 셀 때는 도달 가능한 목록이 맞다.
+    """
     return {
         m.name: frozenset(
             {m.base_table.lower()} | {t.lower() for t in m.absorbed_tables}
+        )
+        for m in layer.models
+    }
+
+
+def _projected_by_model(layer: LogicalLayer) -> dict[str, frozenset[str]]:
+    """**필드를 실제로 낸** 표. 답변 가능 여부를 재는 데 쓴다.
+
+    ``absorbed_tables`` 는 앵커가 도달 *가능한* 표라서 필드 예산과 무관하다.
+    예산에 눌려 컬럼이 하나도 안 남은 표도 목록에는 그대로 있고, 그 목록을
+    읽는 ``coverage`` · ``pair_answerability`` 는 그 표를 100% 로 보고했다 —
+    ``column_retention`` 만 떨어져서, 지표 넷 중 셋이 절삭을 못 봤다.
+
+    앵커는 필드가 없어도 남긴다. 모델이 그 입도로 존재한다는 사실 자체가
+    구조이고, 앵커까지 빼면 빈 모델이 아무 데도 안 잡힌다.
+    """
+    return {
+        m.name: frozenset(
+            {m.base_table.lower()} | {f.source.table.lower() for f in m.fields}
         )
         for m in layer.models
     }
@@ -306,6 +375,22 @@ def _askable_pairs(graph: SchemaGraph, *, hops: int) -> set[frozenset[str]]:
     return pairs
 
 
+def _groupable_tables(layer: LogicalLayer) -> set[str]:
+    """``GROUP BY`` 에 쓸 수 있는 컬럼을 하나라도 내는 물리 표.
+
+    두 가지를 뺀다. 둘 다 앵커 한 행에 값이 하나로 정해지지 않는다:
+
+    * ``filter_only`` — 집계된 자식의 원본 컬럼. 조건만 걸 수 있다.
+    * ``AGGREGATED`` — ``SUM(...)`` 은 묶은 결과지 묶는 기준이 아니다.
+    """
+    return {
+        f.source.table.lower()
+        for model in layer.models
+        for f in model.fields
+        if not f.filter_only and f.source.kind is not FieldKind.AGGREGATED
+    }
+
+
 def _fanout_guarded(layer: LogicalLayer) -> int:
     """집계로 접힌 1:N 자식 테이블의 수 (모델별로 셈)."""
     guarded: set[tuple[str, str]] = set()
@@ -322,6 +407,9 @@ def to_dict(fidelity: Fidelity) -> dict:
         "column_retention": round(fidelity.column_retention, 4),
         "join_absorption": round(fidelity.join_absorption, 4),
         "pair_answerability": round(fidelity.pair_answerability, 4),
+        "table_groupability": round(fidelity.table_groupability, 4),
+        "groupable_tables": list(fidelity.groupable_tables),
+        "ungroupable": list(fidelity.ungroupable),
         "counts": {
             "total_columns": fidelity.total_columns,
             "exposed_columns": fidelity.exposed_columns,
@@ -364,10 +452,22 @@ def render_report(fidelity: Fidelity) -> str:
         f"잡음 {c.dropped_noise_columns} 제외)",
         f"조인 흡수   {c.join_absorption * 100:5.1f}%  "
         f"({c.absorbed_edges}/{c.total_edges} 엣지가 모델 안으로 들어감)",
-        f"답변 가능   {c.pair_answerability * 100:5.1f}%  "
+        f"함께 읽기   {c.pair_answerability * 100:5.1f}%  "
         f"({c.answerable_pairs}/{c.askable_pairs} 쌍, 거리 {c.question_hops} 이내)",
+        f"그룹 가능   {c.table_groupability * 100:5.1f}%  "
+        f"({len(c.groupable_tables)}/"
+        f"{len(c.groupable_tables) + len(c.ungroupable)} 표를 GROUP BY 할 수 있음)",
         f"팬아웃 방어 {c.fanout_guarded:5d}   개의 1:N 자식이 집계로 접힘",
     ]
+    if c.ungroupable:
+        lines.append("")
+        lines.append(
+            f"흡수됐지만 GROUP BY 할 수 없는 표 {len(c.ungroupable)}개 "
+            "(WHERE 로만 걸 수 있다):"
+        )
+        lines.extend(f"  {t}" for t in c.ungroupable[:10])
+        if len(c.ungroupable) > 10:
+            lines.append(f"  … 외 {len(c.ungroupable) - 10}표")
     if c.unanswerable:
         lines.append("")
         lines.append(f"조인 없이 답할 수 없는 쌍 {c.unanswerable_total}개:")

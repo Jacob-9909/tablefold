@@ -133,6 +133,10 @@ def build_lattice(
                     max_hops=max_hops,
                     include_children=include_aggregates,
                 ),
+                inlined=reachable_tables(
+                    graph, p.name, max_hops=max_hops, include_children=False
+                ),
+                provides_grain=_is_virtual(graph, p.name),
                 estimated_fields=max(
                     estimate_fields(
                         graph,
@@ -271,3 +275,13 @@ def reachable_tables(
     if include_children:
         absorbed |= {table.lower() for table, _ in graph.children(anchor)}
     return frozenset(absorbed)
+
+
+def _is_virtual(graph: SchemaGraph, name: str) -> bool:
+    """합성된 앵커인가. :attr:`Candidate.provides_grain` 참고.
+
+    가상 테이블은 그 입도를 가진 물리 테이블이 없어서 세운 것이다. 그러므로 그
+    입도를 다른 앵커가 제공할 수 없고, 중복 판정에서 면제된다.
+    """
+    table = graph.schema.table(name)
+    return bool(table and table.is_virtual)

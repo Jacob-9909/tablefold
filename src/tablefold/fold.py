@@ -48,6 +48,7 @@ def fold(
     selector: Selector | None = None,
     max_hops: int = 3,
     field_budget: int = DEFAULT_FIELD_BUDGET,
+    prompt_budget: int | None = None,
     max_model_fields: int = MAX_MODEL_FIELDS,
     infer_missing_keys: bool = True,
     include_aggregates: bool = True,
@@ -63,6 +64,13 @@ def fold(
     ``selector`` decides which anchors those are — greedy set cover by default,
     or :class:`~tablefold.choose.select.LLMSelector` when the semantic calls a
     foreign-key graph cannot make are worth a completion.
+
+    ``prompt_budget`` 은 레이어 전체가 쓸 **문자 수**다. 주면 ``field_budget`` 을
+    대신한다 — 진짜 제약은 프롬프트 길이이고 필드 수는 대리 변수다.
+
+    ``max_model_fields`` 는 이제 **후보 가격 산정의 상한**일 뿐이다. 모델을 자르지
+    않는다 — :func:`~tablefold.build.compose._allocate` 가 라운드로빈하므로 한
+    앵커가 독식할 수 없고, 실측에서 어떤 값을 줘도 같은 레이어가 나왔다.
 
     ``infer_missing_keys`` recovers references from naming convention. It is on
     by default because a schema with no declared foreign keys yields no graph,
@@ -92,7 +100,7 @@ def fold(
         options=ComposeOptions(
             max_hops=max_hops,
             field_budget=field_budget,
-            max_model_fields=max_model_fields,
+            prompt_budget=prompt_budget,
             include_aggregates=include_aggregates,
             prefix_joined_fields=prefix_joined_fields,
             expose_child_filters=expose_child_filters,

@@ -28,6 +28,16 @@ class MSSQLUnavailable(RuntimeError):
 
 ENV_PREFIX = "TABLEFOLD_MSSQL_"
 
+DIALECT = "tsql"
+"""이 소스가 말하는 sqlglot 방언.
+
+``expand`` 의 기본값은 ``postgres`` 이고, 그 차이는 조용하지 않다 — MSSQL 은
+``LIMIT`` 을 모른다(``OFFSET … FETCH NEXT`` 를 쓴다). 화면이 이 값을 안 넘기던
+동안 "상위 10개" 질문마다 ``Incorrect syntax near 'LIMIT'`` 로 죽었다.
+
+읽는 쪽과 쓰는 쪽이 방언을 따로 적지 않도록 여기 한 벌만 둔다.
+"""
+
 
 def connect_from_env() -> Callable[[], object]:
     """환경 변수로 접속 팩토리를 만든다. 자격 증명을 소스에 두지 않는다.

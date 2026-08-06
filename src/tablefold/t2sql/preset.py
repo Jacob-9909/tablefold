@@ -22,7 +22,13 @@ from tablefold.relate.keys import infer_from_primary_keys
 
 # 별칭 없는 넓은 모델은 필드가 많다. 기본 예산(200 / 모델당 64)으로는 12개 표를
 # 안는 모델에서 팩트 하나가 통째로 잘려 나가고, 그 주제의 질문이 답이 안 된다.
-STAR_FIELD_BUDGET = 400
+#
+# 400 → 450 으로 올렸다. 레이어가 담아야 할 것이 실제로 늘었기 때문이다 —
+# 합성된 기간 앵커(:mod:`tablefold.relate.synthesize`)가 모델 하나를 더하고,
+# 이름 충돌로 조용히 버려지던 필드가 이제 한정 이름으로 살아남는다. 400 에서는
+# ``D_FI_ORG`` 의 ``f_pls_PL_ACCT2_NM`` 통로가 잘려 "매출액 계정의 손익금액"
+# 예시가 죽었다. 실측 곡선: 400→3/4, 450→4/4, 596 에서 포화(더 올려도 안 늘어난다).
+STAR_FIELD_BUDGET = 450
 STAR_MAX_MODEL_FIELDS = 200
 
 # 정방향 2홉이면 팩트 → 차원 → 상위 차원까지 닿는다. 3홉은 웨어하우스에서
@@ -101,6 +107,7 @@ def fold_star_schema(
     infer_missing_keys: bool = False,
     max_hops: int = STAR_MAX_HOPS,
     field_budget: int = STAR_FIELD_BUDGET,
+    prompt_budget: int | None = None,
     max_model_fields: int = STAR_MAX_MODEL_FIELDS,
 ) -> FoldResult:
     """팩트와 차원을 모두 앵커로 두고, 아무것도 새로 사지 않는 앵커만 뺀다.
@@ -123,6 +130,7 @@ def fold_star_schema(
             schema,
             max_hops=max_hops,
             field_budget=field_budget,
+            prompt_budget=prompt_budget,
             max_model_fields=max_model_fields,
             infer_missing_keys=infer_missing_keys,
         )
@@ -136,6 +144,7 @@ def fold_star_schema(
         policy=SelectionPolicy(max_areas=len(anchors)),
         max_hops=max_hops,
         field_budget=field_budget,
+        prompt_budget=prompt_budget,
         max_model_fields=max_model_fields,
         infer_missing_keys=infer_missing_keys,
         include_aggregates=True,

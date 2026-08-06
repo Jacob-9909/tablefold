@@ -20,12 +20,14 @@ CTE(Common Table Expression)를 생성하고 해당 CTE를 조회하도록 SQL �
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import sqlglot
 from sqlglot import exp
 
 from tablefold.ir import (
+    Cardinality,
     FieldKind,
     JoinStep,
     LogicalField,
@@ -159,14 +161,24 @@ def expand(
             f"available: {', '.join(known[:12])}…"
         )
 
+    fields_by_model = {
+        model.name: _required_fields(model, mentioned, star=selects_star)
+        for model in referenced
+    }
+
+    # 좁은 검사가 먼저다. ``_reject_unpushable`` 은 남은 참조를 *어디서든* 잡으므로
+    # 먼저 돌면 ``SELECT`` 에 쓴 경우까지 삼켜 버리고, 정작 그 사람에게 필요한
+    # "앵커 한 행에 대응하는 값이 없다"는 설명이 영영 나가지 않는다.
+    for model in referenced:
+        _reject_projected_filters(model, statement, fields_by_model[model.name])
+
     # 필터 전용 필드에 걸린 조건은 집계 서브쿼리 안으로 옮긴다. 바깥에 남으면
     # 이미 집계된 값에 조건을 거는 셈이라 뜻이 달라진다.
     statement, pushed = _pushdown(statement, referenced)
     _reject_unpushable(statement, referenced)
 
     for model in referenced:
-        fields = _required_fields(model, mentioned, star=selects_star)
-        _reject_projected_filters(model, statement, fields)
+        fields = fields_by_model[model.name]
         select, join_count = _build_model_select(
             model, graph, fields, pushed=pushed
         )
@@ -681,10 +693,52 @@ def _physical(table_name: str, graph: SchemaGraph) -> exp.Table:
     스키마 테이블을 읽는다.
     """
     found = graph.schema.table(table_name)
+    if found is not None and found.source_sql:
+        # 가상 테이블. 이름을 그대로 내보내면 데이터베이스가 못 찾는다.
+        try:
+            return exp.Subquery(this=sqlglot.parse_one(found.source_sql))
+        except Exception as exc:  # noqa: BLE001 — 도메인 오류로 올린다
+            raise ExpansionError(
+                f"virtual table {table_name} has unparseable source_sql: {exc}"
+            ) from exc
     node = exp.Table(this=_ident(table_name))
     if found is not None and found.schema:
         node.set("db", _ident(found.schema))
     return node
+
+
+_PLACEHOLDER = re.compile(r"\{([LR])\}\s*\.")
+
+
+def bind_condition(step: JoinStep, left: str, right: str) -> exp.Expression:
+    """``{L}``/``{R}`` 를 실제 별칭으로 바꿔 조인 술어를 만든다.
+
+    ``{L}`` 은 키를 가진 쪽(다), ``{R}`` 은 참조되는 쪽(일)이다. 탐색이 역방향이면
+    (``ONE_TO_MANY``) 스텝의 from/to 가 뒤집혀 있으므로 별칭도 맞바꿔 준다 —
+    그래야 술어를 한 번만 적어도 양방향에서 같은 뜻이 된다.
+
+    문자열을 이어 붙이지 않고 치환 후 **파싱한다.** 빌드 시점에 터지는 편이
+    이상한 SQL이 데이터베이스까지 가는 것보다 낫다.
+    """
+    assert step.condition is not None
+    many, one = (
+        (left, right) if step.cardinality is Cardinality.MANY_TO_ONE else (right, left)
+    )
+    text = _PLACEHOLDER.sub(
+        lambda m: f"{many}." if m.group(1) == "L" else f"{one}.", step.condition
+    )
+    if "{L}" in text or "{R}" in text:
+        raise ExpansionError(
+            f"join condition for {step.from_table} -> {step.to_table} uses a "
+            f"placeholder that is not followed by a column: {step.condition!r}"
+        )
+    try:
+        return sqlglot.parse_one(text)
+    except Exception as exc:  # noqa: BLE001 — 도메인 오류로 올린다
+        raise ExpansionError(
+            f"join condition for {step.from_table} -> {step.to_table} "
+            f"does not parse: {exc}"
+        ) from exc
 
 
 def _many_to_one_join(
@@ -701,21 +755,58 @@ def _join_condition(path: tuple[JoinStep, ...]) -> exp.Expression:
     left_alias = _BASE_ALIAS if len(path) == 1 else _path_alias(path[:-1])
     right_alias = _path_alias(path)
 
+    if step.condition:
+        return bind_condition(step, left_alias, right_alias)
+
     if len(step.from_columns) != len(step.to_columns):
         raise ExpansionError(
             f"foreign key {step.from_table} -> {step.to_table} has mismatched "
             f"column counts ({len(step.from_columns)} vs {len(step.to_columns)})"
         )
 
+    # 파생키면 다(many) 쪽에 식을 씌운 뒤 등가로 맞춘다. 이 경로는 항상 N:1 이라
+    # 다 쪽이 왼쪽이다.
+    left_terms = _key_terms(step, left_alias)
     return _conjunction(
         [
-            exp.EQ(
-                this=_column(left_alias, left),
-                expression=_column(right_alias, right),
-            )
-            for left, right in zip(step.from_columns, step.to_columns, strict=True)
+            exp.EQ(this=term, expression=_column(right_alias, right))
+            for term, right in zip(left_terms, step.to_columns, strict=True)
         ]
     )
+
+
+def _key_terms(step: JoinStep, alias: str | None) -> list[exp.Expression]:
+    """다(many) 쪽에서 참조 대상의 키를 만들어 내는 항.
+
+    파생키가 없으면 컬럼 그대로, 있으면 식을 적용한 결과다. 식은 자식 컬럼만
+    참조하므로 별칭을 나중에 씌운다 — 그래야 선집계 안(별칭 없음)과 인라인
+    조인(별칭 있음) 양쪽에서 같은 함수를 쓴다.
+    """
+    if not step.key_expressions:
+        return [
+            _column(alias, c) if alias else exp.Column(this=_ident(c))
+            for c in step.from_columns
+        ]
+    if len(step.key_expressions) != len(step.to_columns):
+        raise ExpansionError(
+            f"key_expressions for {step.from_table} -> {step.to_table} has "
+            f"{len(step.key_expressions)} entries but the target key has "
+            f"{len(step.to_columns)}"
+        )
+    terms = []
+    for text in step.key_expressions:
+        try:
+            node = sqlglot.parse_one(text)
+        except Exception as exc:  # noqa: BLE001 — 도메인 오류로 올린다
+            raise ExpansionError(
+                f"key expression for {step.from_table} -> {step.to_table} "
+                f"does not parse: {exc}"
+            ) from exc
+        if alias:
+            for column in node.find_all(exp.Column):
+                column.set("table", _ident(alias))
+        terms.append(node)
+    return terms
 
 
 def _dim_alias(step: JoinStep) -> str:
@@ -739,13 +830,22 @@ def _aggregate_subquery(
     # 자식의 차원을 조인해야 하면 자식에 별칭을 주고 모든 참조를 한정한다.
     # 한정하지 않으면 자식과 차원이 같은 이름의 컬럼을 가질 때 (조인 키가 바로
     # 그렇다) 데이터베이스가 "Ambiguous column name" 으로 거절한다.
+    if step.condition:
+        # 임의 술어는 자식에서 부모 키를 계산할 수 없다. 선집계가 부모 입도를
+        # 못 맞추므로 조인이 조용히 틀린 값을 낸다. 파생키라면
+        # ``key_expressions`` 를 쓴다.
+        raise ExpansionError(
+            f"child {step.to_table} is reached by a non-equi condition; "
+            f"it cannot be pre-aggregated to the grain of {step.from_table}"
+        )
+
     needs_dim = any(len(f.source.path) > 1 for _, f in (predicates or []))
     src = _CHILD_ALIAS if needs_dim else None
     def col(name: str) -> exp.Column:
         return _column(src, name) if src else exp.Column(this=_ident(name))
 
-    group_columns = [col(c) for c in step.to_columns]
-    projections: list[exp.Expression] = list(group_columns)
+    group_columns, projections = _group_keys(step, src)
+    projections = list(projections)
 
     for field in fields:
         source = field.source
@@ -807,15 +907,51 @@ def _aggregate_subquery(
 
 
 def _aggregate_condition(step: JoinStep, alias: str) -> exp.Expression:
+    # 파생키면 서브쿼리가 부모 키 이름으로 계산된 값을 내보낸다
+    # (:func:`_group_keys`). 그때는 양쪽이 같은 이름이다.
+    right_names = step.from_columns if step.key_expressions else step.to_columns
     return _conjunction(
         [
             exp.EQ(
                 this=_column(_BASE_ALIAS, left),
                 expression=_column(alias, right),
             )
-            for left, right in zip(step.from_columns, step.to_columns, strict=True)
+            for left, right in zip(step.from_columns, right_names, strict=True)
         ]
     )
+
+
+def _group_keys(
+    step: JoinStep, src: str | None
+) -> tuple[list[exp.Expression], list[exp.Expression]]:
+    """선집계의 ``GROUP BY`` 항과 그에 대응하는 프로젝션.
+
+    파생키가 없으면 자식의 FK 컬럼 그대로다. 있으면 **식을 그룹 키로 쓴다** —
+    원본 컬럼(``YYYYMMDD``)으로 묶으면 일 입도가 되어 부모(``YYYYMM``)와 안
+    맞고, 조인이 아무 행도 못 찾는다. 식으로 묶어야 부모 키당 한 행이 나온다.
+    """
+    if not step.key_expressions:
+        columns = [
+            _column(src, c) if src else exp.Column(this=_ident(c))
+            for c in step.to_columns
+        ]
+        return columns, list(columns)
+
+    # 다(many) 쪽은 자식이다. 식은 자식 컬럼 기준으로 적혀 있다.
+    many_side = JoinStep(
+        from_table=step.to_table,
+        from_columns=step.to_columns,
+        to_table=step.from_table,
+        to_columns=step.from_columns,
+        cardinality=Cardinality.MANY_TO_ONE,
+        key_expressions=step.key_expressions,
+    )
+    terms = _key_terms(many_side, src)
+    projections = [
+        _aliased(term, name)
+        for term, name in zip(terms, step.from_columns, strict=True)
+    ]
+    return terms, projections
 
 
 def _available_join_count(model: LogicalModel) -> int:

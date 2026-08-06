@@ -19,10 +19,19 @@ from tablefold.choose.select import ExplicitSelector
 from tablefold.fold import fold
 from tablefold.read.ddl import DDLIntrospector
 from tablefold.relate.graph import SchemaGraph, infer_foreign_keys
+from tablefold.relate.synthesize import add_period_anchor
 from tablefold.report import fidelity as fid
 from tablefold.report import lineage as lin
 from tablefold.report import prompt as emit
 from tablefold.rewrite.expand import ExpansionError, expand
+from tablefold.t2sql.prepare import dialect_for_live
+from tablefold.t2sql.preset import (
+    STAR_FIELD_BUDGET,
+    STAR_MAX_HOPS,
+    STAR_MAX_MODEL_FIELDS,
+    recover_relationships,
+    split_anchors,
+)
 
 BASE_DIR = Path(__file__).parent.parent
 FIXTURES_DIR = BASE_DIR / "fixtures"
@@ -40,19 +49,19 @@ app.add_middleware(
 
 class FoldRequest(BaseModel):
     ddl: str = ""
-    source: str = "ddl"
-    """``ddl`` 이면 위의 텍스트를, ``live`` 면 접속된 데이터베이스를 읽는다."""
-
-    anchor_mode: str = "auto"
-    """``auto`` 는 탐욕적 집합 커버. 스타 스키마에서는 ``fact`` / ``dim`` 으로
-    앵커를 직접 지정한다 — 팩트가 앵커면 차원이 인라인되고, 차원이 앵커면
-    팩트들이 사전집계되어 팩트 간 조인이 사라진다."""
+    source: str = "live"
+    anchor_mode: str = "mixed"
 
     coverage: float = 0.90
     min_gain: int = 2
     max_cost: float = 10.0
     field_budget: int = DEFAULT_FIELD_BUDGET
-    """레이어 전체가 쓸 수 있는 필드 수. 모델 하나당이 아니다."""
+    prompt_budget: int | None = None
+    """레이어 전체가 쓸 **문자 수**. 주면 ``field_budget`` 을 대신한다.
+
+    진짜 제약은 프롬프트 길이지 필드 수가 아니다. 필드 수는 대리 변수이고
+    필드당 평균 50자였지만 이름·주석 길이에 따라 흔들린다.
+    """
 
     max_areas: int | None = 6
 
@@ -60,34 +69,56 @@ class FoldRequest(BaseModel):
 class ExpandRequest(BaseModel):
     ddl: str = ""
     sql: str
-    source: str = "ddl"
-    anchor_mode: str = "auto"
+    source: str = "live"
+    dialect: str = ""
+    """비워 두면 소스가 정한다. :class:`ChatRequest` 와 같은 규칙이다."""
+
+    anchor_mode: str = "mixed"
     coverage: float = 0.90
     min_gain: int = 2
     max_cost: float = 10.0
     field_budget: int = DEFAULT_FIELD_BUDGET
+    prompt_budget: int | None = None
+    """레이어 전체가 쓸 **문자 수**. 주면 ``field_budget`` 을 대신한다.
+
+    진짜 제약은 프롬프트 길이지 필드 수가 아니다. 필드 수는 대리 변수이고
+    필드당 평균 50자였지만 이름·주석 길이에 따라 흔들린다.
+    """
+
     max_areas: int | None = 6
 
 
 class ChatRequest(BaseModel):
     question: str
     ddl: str = ""
-    source: str = "ddl"
-    dialect: str = "postgres"
-    anchor_mode: str = "auto"
+    source: str = "live"
+    dialect: str = ""
+    """비워 두면 소스가 정한다 — 라이브는 MSSQL 이므로 ``tsql``.
+
+    기본값이 ``postgres`` 이던 동안 화면은 ``LIMIT`` 을 만들어 MSSQL 에 던졌고
+    "상위 10개" 질문이 전부 문법 오류로 죽었다. CLI 는 같은 질문에서
+    ``OFFSET … FETCH NEXT`` 를 냈다.
+    """
+    anchor_mode: str = "mixed"
     coverage: float = 0.90
     min_gain: int = 2
     max_cost: float = 10.0
     field_budget: int = DEFAULT_FIELD_BUDGET
-    max_areas: int | None = 6
+    prompt_budget: int | None = None
+    """레이어 전체가 쓸 **문자 수**. 주면 ``field_budget`` 을 대신한다.
 
+    진짜 제약은 프롬프트 길이지 필드 수가 아니다. 필드 수는 대리 변수이고
+    필드당 평균 50자였지만 이름·주석 길이에 따라 흔들린다.
+    """
+
+    max_areas: int | None = 6
 
 
 @app.get("/api/sample")
 def get_sample_ddl() -> dict[str, str]:
-    sample_file = FIXTURES_DIR / "retail_50.sql"
+    sample_file = FIXTURES_DIR / "enterprise_bi.sql"
     if not sample_file.exists():
-        raise HTTPException(status_code=404, detail="Sample DDL fixture not found.")
+        sample_file = FIXTURES_DIR / "retail_50.sql"
     return {"ddl": sample_file.read_text(encoding="utf-8")}
 
 
@@ -96,8 +127,40 @@ def list_sources() -> dict[str, Any]:
     """어떤 스키마 소스를 쓸 수 있는지."""
     return {
         "live_available": live.available(),
-        "live_label": os.environ.get("TABLEFOLD_MSSQL_DB", ""),
+        "live_label": os.environ.get("TABLEFOLD_MSSQL_DB", "enterprise_bi"),
     }
+
+
+
+def _star_source(schema, meta: dict[str, Any]):
+    """스타 프리셋 — 챗봇·CLI 가 쓰는 것과 **같은** 레이어.
+
+    :func:`tablefold.t2sql.preset.fold_star_schema` 를 여기서 다시 부르지 않고
+    옵션으로 풀어 쓰는 이유는 ``run_fold`` 가 폴드 전후로 격자·계보·반영도를 함께
+    재기 때문이다. 다만 값은 프리셋 상수를 그대로 쓴다 — 여기에 숫자를 새로 적으면
+    화면과 챗봇이 다시 갈라진다.
+
+    관계 복구를 여기서 미리 한다. 화면의 이름 기반 추론(``infer_foreign_keys``)과
+    챗봇의 기본 키 기반 복구(``recover_relationships``)는 서로 다른 엣지를 만들고,
+    그 차이가 그대로 모델 개수 차이로 나타난다.
+    """
+    schema = add_period_anchor(recover_relationships(schema))
+    dimensions, facts = split_anchors(SchemaGraph.build(schema))
+    anchors = facts + dimensions
+
+    options: dict[str, Any] = {
+        "infer_missing_keys": False,
+        "include_aggregates": True,
+        "expose_child_filters": True,
+        "prefix_joined_fields": False,
+        "max_hops": STAR_MAX_HOPS,
+        "field_budget": STAR_FIELD_BUDGET,
+        "max_model_fields": STAR_MAX_MODEL_FIELDS,
+    }
+    if anchors:
+        options["selector"] = ExplicitSelector(anchors, prune_redundant=True)
+        options["max_areas"] = len(anchors)
+    return schema, options, {**meta, "anchors": list(anchors)}
 
 
 def _load_source(req: FoldRequest | ExpandRequest):
@@ -112,6 +175,9 @@ def _load_source(req: FoldRequest | ExpandRequest):
             schema, meta = live.load()
         except live.LiveUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        if req.anchor_mode == "star":
+            return _star_source(schema, meta)
 
         facts = tuple(meta["facts"])
         dims = tuple(meta["dimensions"])
@@ -172,6 +238,8 @@ def _load_source(req: FoldRequest | ExpandRequest):
         raise HTTPException(
             status_code=400, detail="No valid CREATE TABLE statements found in DDL."
         )
+    if req.anchor_mode == "star":
+        return _star_source(schema, {})
     return schema, {"infer_missing_keys": True}, {}
 
 
@@ -208,6 +276,8 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
         max_areas = fold_options.pop("max_areas", req.max_areas)
         field_budget = fold_options.pop("field_budget", req.field_budget)
         model_cap = fold_options.pop("max_model_fields", MAX_MODEL_FIELDS)
+        # 요청이 문자 예산을 주면 그것이 이긴다. 필드 수는 대리 변수다.
+        prompt_budget = req.prompt_budget
         policy = SelectionPolicy(
             coverage_target=req.coverage,
             min_gain=req.min_gain,
@@ -216,14 +286,27 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
         )
 
         # 3. 후보 격자 (Candidate Lattice) 수치 측정
-        # 후보 가격 산정은 모델 하나의 상한 기준. 레이어 예산과는 다른 값이다.
-        lattice = build_lattice(graph, profiles, max_hops=3, max_fields=MAX_MODEL_FIELDS)
+        #
+        # **폴드가 실제로 쓸 값과 같아야 한다.** 여기에 숫자를 따로 적으면 화면의
+        # 가격표가 실제로 지불한 가격이 아니게 된다 — ``max_hops=3``,
+        # ``max_fields=64`` 로 값을 매겨 놓고 폴드는 ``max_hops=2``,
+        # ``max_model_fields=200`` 으로 돌던 동안, 격자가 비싸다고 표시한 앵커가
+        # 실제로는 싸게 들어왔고 그 반대도 있었다.
+        lattice = build_lattice(
+            graph,
+            profiles,
+            max_hops=fold_options.get("max_hops", 3),
+            max_fields=model_cap,
+            include_aggregates=fold_options.get("include_aggregates", True),
+            expose_child_filters=fold_options.get("expose_child_filters", False),
+        )
 
         # 4. 폴딩 실행 (Tier-1 Core Models)
         result = fold(
             enriched_schema,
             policy=policy,
             field_budget=field_budget,
+            prompt_budget=prompt_budget,
             max_model_fields=model_cap,
             **fold_options,
         )
@@ -350,6 +433,7 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
                 "min_gain": req.min_gain,
                 "max_fields_per_table": req.max_cost,
                 "field_budget": field_budget,
+                "prompt_budget": prompt_budget,
                 "max_areas": max_areas,
                 "anchor_mode": req.anchor_mode,
             },
@@ -407,22 +491,35 @@ def run_expand(req: ExpandRequest) -> dict[str, Any]:
         max_areas = fold_options.pop("max_areas", req.max_areas)
         field_budget = fold_options.pop("field_budget", req.field_budget)
         model_cap = fold_options.pop("max_model_fields", MAX_MODEL_FIELDS)
+        # 요청이 문자 예산을 주면 그것이 이긴다. 필드 수는 대리 변수다.
+        prompt_budget = req.prompt_budget
         policy = SelectionPolicy(
             coverage_target=req.coverage,
             min_gain=req.min_gain,
             max_fields_per_table=req.max_cost,
             max_areas=max_areas,
         )
-        model_cap = fold_options.pop("max_model_fields", MAX_MODEL_FIELDS)
+        # ``model_cap`` 은 위에서 이미 꺼냈다. 여기서 한 번 더 ``pop`` 하면 키가
+        # 없으므로 기본값 64 로 덮여서, ``/api/fold`` 가 그린 레이어(200)와 다른
+        # 레이어를 상대로 확장하게 된다 — 화면에 보이는 필드가 "모르는 필드"로
+        # 거부되는 경로였다.
         result = fold(
             schema,
             policy=policy,
             field_budget=field_budget,
+            prompt_budget=prompt_budget,
             max_model_fields=model_cap,
             **fold_options,
         )
 
-        expansion = expand(req.sql, result.layer, result.graph)
+        # 화면의 "바꿔보기"도 같은 데이터베이스를 겨냥한다. 여기만 기본값
+        # ``postgres`` 로 두면 챗봇과 다른 SQL 을 보여 주게 된다.
+        expansion = expand(
+            req.sql,
+            result.layer,
+            result.graph,
+            dialect=dialect_for_live(req.dialect),
+        )
 
         return {
             "expanded_sql": expansion.sql,
@@ -437,7 +534,122 @@ def run_expand(req: ExpandRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+class AutoTuneRequest(BaseModel):
+    source: str = "ddl"
+    ddl: str = ""
+
+
+from fastapi.responses import StreamingResponse
+
+
+GOLDSET_GLOB = "*.xlsx"
+"""프로젝트 루트에서 골드셋을 찾을 패턴. 없으면 곡선 기능이 조용히 꺼진다."""
+
+
+def _find_goldset():
+    """읽히는 첫 골드셋과 그 케이스. 없으면 ``(None, ())``.
+
+    골드셋이 없는 설치도 있으므로 실패를 예외로 만들지 않는다 — 곡선 버튼이
+    안 보일 뿐 나머지는 그대로 돈다.
+    """
+    from tablefold.t2sql.goldset import load_goldset
+
+    for path in sorted(BASE_DIR.glob(GOLDSET_GLOB)):
+        try:
+            cases = load_goldset(path)
+        except Exception:  # noqa: BLE001 — 엑셀은 형태가 제각각이다
+            continue
+        if any(c.gold_references for c in cases):
+            return path, cases
+    return None, ()
+
+
+@app.get("/api/goldset")
+def goldset_info() -> dict[str, Any]:
+    path, cases = _find_goldset()
+    return {
+        "available": path is not None,
+        "name": path.name if path else "",
+        "cases": len(cases),
+        "subjects": len({c.subject for c in cases}),
+    }
+
+
+@app.post("/api/curve")
+def run_curve(req: FoldRequest) -> dict[str, Any]:
+    """프롬프트 길이 ↔ 답할 수 있는 질문 수의 **교환곡선**.
+
+    설정 하나를 추천하는 대신 곡선을 준다. 노브가 존재하는 이유는 목적함수가
+    없어서인데, 골드셋이 목적함수가 되면 "얼마를 줄까"가 튜닝이 아니라 비용 대
+    커버리지의 결정이 된다. LLM 을 부르지 않으므로 한 점당 폴드 한 번이다.
+    """
+    _, cases = _find_goldset()
+    if not cases:
+        raise HTTPException(status_code=404, detail="골드셋을 찾지 못했다.")
+
+    from tablefold.choose import tune as tuning
+
+    try:
+        schema, _, _ = _load_source(req)
+        points = tuning.curve(schema, cases)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    best = tuning.knee(points)
+    return {
+        "points": [
+            {
+                "prompt_budget": p.prompt_budget,
+                "prompt_length": p.prompt_length,
+                "models": p.models,
+                "fields": p.fields,
+                "answered": p.answered,
+                "total": p.total,
+                "answered_subjects": p.answered_subjects,
+                "total_subjects": p.total_subjects,
+            }
+            for p in points
+        ],
+        "knee": best.prompt_budget if best else None,
+    }
+
+
+@app.post("/api/autotune")
+def run_autotune(req: AutoTuneRequest):
+    if not req.ddl.strip() and req.source == "ddl":
+        default_file = FIXTURES_DIR / "enterprise_bi.sql"
+        if default_file.exists():
+            req.ddl = default_file.read_text(encoding="utf-8")
+        else:
+            sample_file = FIXTURES_DIR / "retail_50.sql"
+            req.ddl = sample_file.read_text(encoding="utf-8")
+
+    try:
+        fold_req = FoldRequest(source=req.source, ddl=req.ddl)
+        schema, _, _ = _load_source(fold_req)
+
+        from tablefold.choose.autotune import autotune_stream
+
+        def event_generator():
+            import json
+            for item in autotune_stream(schema):
+                # ``_`` 로 시작하는 키는 파이썬 호출자용이다(``AutoTuneResult``
+                # 객체). JSON 으로 나가면 안 된다.
+                payload = {k: v for k, v in item.items() if not k.startswith("_")}
+                yield json.dumps(payload) + "\n"
+
+        return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+
 @app.post("/api/chat")
+
 def run_chat(req: ChatRequest) -> dict[str, Any]:
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question is required.")
@@ -461,17 +673,23 @@ def run_chat(req: ChatRequest) -> dict[str, Any]:
             default_completer,
             prepare_for_questions,
         )
+        from tablefold.t2sql.prepare import dialect_for_live
 
         prep = prepare_for_questions(
             schema,
             already_recovered=len(inferred) if req.source == "live" else 0,
+            # 화면이 문자 예산을 정했으면 챗봇도 **같은 레이어**를 봐야 한다.
+            # 여기만 기본값으로 두면 화면에 그려진 필드를 챗봇이 모른다.
+            prompt_budget=req.prompt_budget,
         )
 
         engine = TextToSQLEngine(
             prep.result,
             completer=default_completer(),
             examples=NL2SQL_EXAMPLES,
-            dialect=req.dialect,
+            # 만든 SQL 을 그대로 이 데이터베이스에 실행한다. 생성 방언과 실행
+            # 대상이 어긋나면 문법 오류로 죽는다.
+            dialect=dialect_for_live(req.dialect),
         )
 
         gen_res = engine.generate(req.question)

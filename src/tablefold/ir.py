@@ -49,6 +49,22 @@ class PhysicalTable:
     comment: str | None = None
     row_estimate: int | None = None
 
+    source_sql: str | None = None
+    """물리 테이블이 아니라 이 SQL이 이 테이블의 행을 낸다 (가상 테이블).
+
+    쓰임은 둘이다. **가상 앵커** — 여러 팩트가 공유하는 키를 모아 줄 단위를
+    정의한다. 실측 스키마에서 ``YYYYMM`` 은 7개 팩트에 있는데 캘린더 차원이
+    없어서, 앵커로 삼을 테이블이 존재하지 않았다. **수직 결합** — 정규직/계약직
+    급여처럼 구조가 같고 조인되지 않는 표를 한 테이블로 세운다.
+
+    앵커로 쓰려면 키당 **정확히 한 행**이어야 한다. ``UNION ALL`` 이 아니라
+    ``UNION`` 이어야 하고, 그렇지 않으면 앵커 자신이 복제되어 입도 보호가 무너진다.
+    """
+
+    @property
+    def is_virtual(self) -> bool:
+        return self.source_sql is not None
+
     @property
     def qualified_name(self) -> str:
         return f"{self.schema}.{self.name}" if self.schema else self.name
@@ -78,6 +94,40 @@ class ForeignKey:
     name: str | None = None
     inferred: bool = False
     confidence: float = 1.0
+
+    key_expressions: tuple[str, ...] | None = None
+    """``from_columns`` 를 참조 대상의 키로 바꾸는 식 (**파생키**). 컬럼당 하나.
+
+    ``F_SALES.YYYYMMDD`` 와 ``V_CALENDAR.YYYYMM`` 은 같은 기간을 뜻하지만 값이
+    다르다. ``("substr(YYYYMMDD, 1, 6)",)`` 를 주면 양방향이 모두 성립한다::
+
+        N:1 인라인   ON substr(base.YYYYMMDD, 1, 6) = j.YYYYMM
+        1:N 선집계   SELECT substr(YYYYMMDD, 1, 6) AS YYYYMM, SUM(...)
+                     GROUP BY substr(YYYYMMDD, 1, 6)
+
+    :attr:`condition` 과 달리 **부모 키를 자식에서 계산할 수 있다.** 그래서
+    선집계가 여전히 부모 키당 한 행을 내고, 입도 보호가 무너지지 않는다.
+    식은 자식 컬럼만 참조해야 하며 한정자를 붙이지 않는다.
+    """
+
+    condition: str | None = None
+    """조인 술어를 컬럼 등가 대신 이 SQL로 쓴다 (**비등가**).
+
+    ``from_columns``/``to_columns`` 는 그대로 채워 둔다 — 카디널리티 재검증과
+    자식 키 식별이 그것을 읽는다. 이 필드는 ``ON`` 절만 덮는다.
+
+    별칭은 확장이 경로에서 만들어 내므로 사람이 쓸 수 없다. 플레이스홀더로 적으면
+    확장이 바인딩한다. ``{L}`` 은 **키를 가진 쪽**(다), ``{R}`` 은 **참조되는
+    쪽**(일)이다 — 탐색 방향이 뒤집혀도(:meth:`SchemaGraph.children`) 이 대응은
+    변하지 않으므로 술어를 한 번만 적으면 된다::
+
+        "{L}.EMP_NO = {R}.EMP_NO AND {L}.WORK_YMD "
+        "BETWEEN {R}.VALID_FROM AND {R}.VALID_TO"          # 비등가(SCD2)
+
+    **N:1 인라인 전용이다.** 역방향(1:N)에서는 자식에서 부모 키를 계산할 수 없어
+    선집계가 부모 입도를 못 맞춘다. 확장이 거부한다 — 파생키라면
+    :attr:`key_expressions` 를 쓴다.
+    """
 
 
 @dataclass(frozen=True)
@@ -119,6 +169,12 @@ class JoinStep:
     to_table: str
     to_columns: tuple[str, ...]
     cardinality: Cardinality
+
+    key_expressions: tuple[str, ...] | None = None
+    """:attr:`ForeignKey.key_expressions`. **다(many) 쪽 컬럼** 기준으로 적힌다."""
+
+    condition: str | None = None
+    """:attr:`ForeignKey.condition` 을 그대로 나른다. ``{L}``/``{R}`` 플레이스홀더."""
 
 
 class FieldKind(StrEnum):

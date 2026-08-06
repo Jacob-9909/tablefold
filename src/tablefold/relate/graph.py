@@ -108,6 +108,8 @@ class SchemaGraph:
                     to_table=fk.to_table,
                     to_columns=fk.to_columns or self._key_of(fk.to_table),
                     cardinality=Cardinality.MANY_TO_ONE,
+                    key_expressions=fk.key_expressions,
+                    condition=fk.condition,
                 )
                 extended = (*path, step)
                 seen.add(edge)
@@ -128,6 +130,8 @@ class SchemaGraph:
                 to_table=fk.from_table,
                 to_columns=fk.from_columns,
                 cardinality=Cardinality.ONE_TO_MANY,
+                key_expressions=fk.key_expressions,
+                condition=fk.condition,
             )
             found.append((fk.from_table, step))
         return tuple(found)
