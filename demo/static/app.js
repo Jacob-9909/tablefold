@@ -302,13 +302,12 @@ async function runAutoTune(e) {
 
 function readSettings() {
   const source = $("sourceSelect").value;
-  // 프롬프트 예산은 문자 수다. 필드 수는 대리 변수일 뿐이고, 실제 제약은 AI가
-  // 한 번에 읽는 길이다 — 비워 두면 서버가 항목 수로 대신 잰다.
+  const isLive = source === "live" || source === "financial";
   const promptBudget = parseInt($("promptBudget").value, 10);
   return {
     ddl: source === "ddl" ? $("ddlInput").value : "",
     source,
-    anchor_mode: source === "live" ? $("anchorSelect").value : "auto",
+    anchor_mode: isLive ? $("anchorSelect").value : "auto",
     coverage: parseFloat($("coverage").value),
     min_gain: parseInt($("minGain").value, 10),
     max_cost: parseFloat($("maxCost").value),
@@ -322,7 +321,8 @@ function readSettings() {
 // "값을 바꿨는데 결과가 그대로"인 이유를 알 방법이 없다.
 function syncGreedyKnobs() {
   const source = $("sourceSelect").value;
-  const mode = source === "live" ? $("anchorSelect").value : "auto";
+  const isLive = source === "live" || source === "financial";
+  const mode = isLive ? $("anchorSelect").value : "auto";
   const inert = mode !== "auto";
   document.querySelectorAll(".greedy-only").forEach((el) => {
     el.classList.toggle("is-inert", inert);

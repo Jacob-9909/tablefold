@@ -1,0 +1,10 @@
+# 골드셋·보고 산출물은 클라이언트 데이터다. 공개 URL 번들에 넣지 않는다.
+*.xlsx
+docs/
+tests/
+scripts/
+fixtures/*.dump
+.venv/
+.env
+.coverage
+.env.local

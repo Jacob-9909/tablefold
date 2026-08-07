@@ -80,6 +80,66 @@ def load(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
     return _load_real(schema_name)
 
 
+def _connect_db(database_name: str):
+    def connect_fn():
+        import pymssql
+        return pymssql.connect(
+            server=os.environ.get("TABLEFOLD_MSSQL_HOST", "localhost"),
+            port=int(os.environ.get("TABLEFOLD_MSSQL_PORT", "11433")),
+            user=os.environ.get("TABLEFOLD_MSSQL_USER", "sa"),
+            password=os.environ.get("TABLEFOLD_MSSQL_PASSWORD", "Nl2Sql!Local#2026").strip("'\""),
+            database=database_name,
+        )
+    return connect_fn
+
+
+
+def load_financial(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
+    """독립된 FINANCIAL_DB 데이터베이스에서 13개 금융합성 스키마를 읽어 돌려준다."""
+    if not available_real_db():
+        raise LiveUnavailable("데이터베이스 접속 정보가 없습니다.")
+
+    connect = _connect_db("FINANCIAL_DB")
+    raw_schema = MSSQLIntrospector(connect, schema=schema_name).introspect()
+
+    from tablefold.ir import ForeignKey
+    inferred_fks = [
+        ForeignKey(from_table="telecom_card_cb_combined_info", from_columns=("CUST_ID",), to_table="member_info", to_columns=("member_no",), inferred=True),
+        ForeignKey(from_table="personal_cb_info", from_columns=("ID",), to_table="member_info", to_columns=("member_no",), inferred=True),
+        ForeignKey(from_table="corporate_cb_info", from_columns=("ID",), to_table="member_info", to_columns=("member_no",), inferred=True),
+    ]
+
+    schema = PhysicalSchema(
+        tables=raw_schema.tables,
+        foreign_keys=raw_schema.foreign_keys + tuple(inferred_fks)
+    )
+
+    dims = tuple(t.name for t in schema.tables if t.name == "member_info")
+    facts = tuple(t.name for t in schema.tables if t.name != "member_info")
+
+    conn = connect()
+    try:
+        schema, recovered = recover_with_data(
+            schema, conn.cursor(), targets=dims or None
+        )
+    finally:
+        conn.close()
+
+    meta = {
+        "database": "FINANCIAL_DB",
+        "schema": schema_name,
+        "dimensions": list(dims),
+        "facts": list(facts),
+        "declared_fk_count": len([fk for fk in schema.foreign_keys if not fk.inferred]),
+        "candidate_fk_count": len(recovered),
+        "recovered_fk_count": len(recovered),
+        "ddl": render_ddl(schema),
+    }
+    return schema, meta
+
+
+
+
 def available_real_db() -> bool:
     return env_configured()
 

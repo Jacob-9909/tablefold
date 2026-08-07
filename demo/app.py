@@ -128,22 +128,13 @@ def list_sources() -> dict[str, Any]:
     return {
         "live_available": live.available(),
         "live_label": os.environ.get("TABLEFOLD_MSSQL_DB", "enterprise_bi"),
+        "financial_available": live.available(),
+        "financial_label": "금융합성데이터 (13테이블, 2508컬럼)",
     }
 
 
-
 def _star_source(schema, meta: dict[str, Any]):
-    """스타 프리셋 — 챗봇·CLI 가 쓰는 것과 **같은** 레이어.
-
-    :func:`tablefold.t2sql.preset.fold_star_schema` 를 여기서 다시 부르지 않고
-    옵션으로 풀어 쓰는 이유는 ``run_fold`` 가 폴드 전후로 격자·계보·반영도를 함께
-    재기 때문이다. 다만 값은 프리셋 상수를 그대로 쓴다 — 여기에 숫자를 새로 적으면
-    화면과 챗봇이 다시 갈라진다.
-
-    관계 복구를 여기서 미리 한다. 화면의 이름 기반 추론(``infer_foreign_keys``)과
-    챗봇의 기본 키 기반 복구(``recover_relationships``)는 서로 다른 엣지를 만들고,
-    그 차이가 그대로 모델 개수 차이로 나타난다.
-    """
+    """스타 프리셋 — 챗봇·CLI 가 쓰는 것과 **같은** 레이어."""
     schema = add_period_anchor(recover_relationships(schema))
     dimensions, facts = split_anchors(SchemaGraph.build(schema))
     anchors = facts + dimensions
@@ -164,12 +155,26 @@ def _star_source(schema, meta: dict[str, Any]):
 
 
 def _load_source(req: FoldRequest | ExpandRequest):
-    """요청이 가리키는 스키마와, 그 스키마에 맞는 폴드 옵션을 함께 돌려준다.
+    """요청이 가리키는 스키마와, 그 스키마에 맞는 폴드 옵션을 함께 돌려준다."""
+    if req.source == "financial":
+        try:
+            schema, meta = live.load_financial()
+        except live.LiveUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    옵션이 소스마다 다른 이유는 스키마의 성격이 다르기 때문이다. 웨어하우스
-    스타 스키마는 앵커가 자명하고(팩트가 곧 앵커), 테이블 이름이 사람이 읽을
-    말이 아니라서 인라인 필드에 접두사를 붙이면 실제 질의와 어긋난다.
-    """
+        anchors = ("member_info", "bank_receipt_product_info", "public_fund_product_info")
+        options = {
+            "selector": ExplicitSelector(anchors, prune_redundant=True),
+            "infer_missing_keys": True,
+            "include_aggregates": True,
+            "expose_child_filters": True,
+            "prefix_joined_fields": False,
+            "max_hops": 2,
+            "field_budget": 5000,
+            "max_model_fields": 1000,
+        }
+        return schema, options, meta
+
     if req.source == "live":
         try:
             schema, meta = live.load()
@@ -181,6 +186,7 @@ def _load_source(req: FoldRequest | ExpandRequest):
 
         facts = tuple(meta["facts"])
         dims = tuple(meta["dimensions"])
+
 
         # 앵커를 무엇으로 잡느냐가 곧 무엇을 물을 수 있느냐다. 실측(NL2SQL 19테이블):
         #

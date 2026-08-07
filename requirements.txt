@@ -1,0 +1,11 @@
+# Vercel 서버리스 번들용 의존성.
+# pyproject.toml 과 달리 pymssql 은 뺀다 — 라이브 MSSQL 은 localhost 라
+# 서버리스에서 닿지 않고, 드라이버는 lazy import 라 없어도 부팅한다.
+fastapi>=0.141.1
+pydantic>=2.0
+sqlglot>=25.0
+pyyaml>=6.0
+python-dotenv>=1.2.2
+typer>=0.12
+openai>=2.53.0
+openpyxl>=3.1.5
