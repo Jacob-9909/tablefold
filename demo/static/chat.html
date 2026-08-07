@@ -240,6 +240,9 @@
       <label>소스: 
         <select id="sourceSelect">
           <option value="live" selected>🔌 실제 데이터베이스 카탈로그 (Live DB)</option>
+          <!-- 연결이 없는 설치가 내려앉을 자리. 서버는 source=ddl 이고 ddl 이
+               비어 있으면 enterprise_bi 예제 스키마를 쓴다. -->
+          <option value="ddl">📄 예제 스키마 (enterprise_bi 19테이블)</option>
         </select>
       </label>
 
@@ -281,6 +284,24 @@
     document.getElementById('userInput').value = text;
     document.getElementById('userInput').focus();
   }
+
+  // 라이브 소스는 접속이 있을 때만 고를 수 있다. 없는데 남겨 두면 첫 질문이
+  // 503 으로 끝나고, 읽는 사람은 챗봇이 고장 난 줄 안다.
+  document.addEventListener('DOMContentLoaded', async () => {
+    const select = document.getElementById('sourceSelect');
+    const live = select.querySelector('option[value="live"]');
+    try {
+      const info = await (await fetch('/api/sources')).json();
+      if (!info.live_available) {
+        live.textContent = '🔌 실제 데이터베이스 카탈로그 (연결 없음)';
+        live.disabled = true;
+        select.value = 'ddl';
+      }
+    } catch {
+      live.disabled = true;
+      select.value = 'ddl';
+    }
+  });
 
   async function handleSend(e) {
     e.preventDefault();

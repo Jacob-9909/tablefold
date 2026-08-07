@@ -51,10 +51,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 /** 연결된 데이터베이스가 있으면 그것을 기본으로, 없으면 예제로 내려앉는다. */
 async function discoverSources() {
   const option = $("sourceSelect").querySelector('option[value="live"]');
+  const financial = $("sourceSelect").querySelector('option[value="financial"]');
   try {
     const res = await fetch("/api/sources");
     const info = await res.json();
     liveAvailable = Boolean(info.live_available);
+    // 금융 소스도 같은 접속을 쓴다. 고를 수 있게 두면 누르는 순간 503 이다.
+    if (financial) financial.disabled = !info.financial_available;
     if (liveAvailable) {
       option.textContent = `데이터베이스 연결${
         info.live_label ? ` (${info.live_label})` : ""
@@ -68,6 +71,7 @@ async function discoverSources() {
   } catch {
     option.textContent = "데이터베이스 연결 (확인 실패)";
     option.disabled = true;
+    if (financial) financial.disabled = true;
     $("sourceSelect").value = "ddl";
   }
   syncSourceUI();
