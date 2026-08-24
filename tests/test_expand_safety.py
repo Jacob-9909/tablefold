@@ -953,3 +953,97 @@ def test_selecting_a_filter_only_field_says_why(retail_graph):
 
     with pytest.raises(ExpansionError, match="carry no value at the model's grain"):
         expand(f"SELECT {field.name} FROM {model.name}", layer, retail_graph)
+
+
+def _two_children_schema(second_fk_columns):
+    """부모 하나에 자식 둘 — 두 번째 자식의 조인 키를 바꿔가며 시험한다."""
+    orders = PhysicalTable(
+        name="orders",
+        columns=(
+            PhysicalColumn("order_id", "bigint", nullable=False),
+            PhysicalColumn("region_cd", "varchar"),
+            PhysicalColumn("amount", "numeric"),
+        ),
+        primary_key=("order_id",),
+    )
+    items = PhysicalTable(
+        name="order_items",
+        columns=(
+            PhysicalColumn("line_id", "bigint", nullable=False),
+            PhysicalColumn("order_id", "bigint"),
+            PhysicalColumn("qty", "integer"),
+        ),
+        primary_key=("line_id",),
+    )
+    notes = PhysicalTable(
+        name="order_notes",
+        columns=(
+            PhysicalColumn("note_id", "bigint", nullable=False),
+            *(PhysicalColumn(name, "bigint") for name, _ in second_fk_columns),
+            PhysicalColumn("score", "integer"),
+        ),
+        primary_key=("note_id",),
+    )
+    fks = [
+        ForeignKey("order_items", ("order_id",), "orders", ("order_id",)),
+        ForeignKey(
+            "order_notes",
+            tuple(name for name, _ in second_fk_columns),
+            "orders",
+            tuple(target for _, target in second_fk_columns),
+        ),
+    ]
+    schema = PhysicalSchema(tables=(orders, items, notes), foreign_keys=tuple(fks))
+    from tablefold.choose.select import ExplicitSelector
+
+    return fold(
+        schema,
+        infer_missing_keys=False,
+        selector=ExplicitSelector(("orders",)),
+        policy=SelectionPolicy(max_areas=1),
+        field_budget=10_000,
+    )
+
+
+def test_children_joined_on_different_keys_warn_about_coverage():
+    """매출은 조직 입도, 계획은 조직×품목 입도 — 나란히 놓으면 범위가 다르다.
+
+    막지는 않는다. 합법적인 질문이다. 대신 말해 준다: 에러 없이 치우친 답보다
+    낫다.
+    """
+    from tablefold.ir import FieldKind
+
+    result = _two_children_schema((("region_cd", "region_cd"),))
+    fields = [
+        f
+        for f in result.layer.model("orders").fields
+        if f.source.kind is FieldKind.AGGREGATED
+    ]
+
+    expansion = expand(
+        f"SELECT {', '.join(f.name for f in fields)} FROM orders",
+        result.layer,
+        result.graph,
+    )
+
+    assert any("범위가 다릅니다" in w for w in expansion.warnings)
+
+
+def test_children_on_the_same_key_stay_silent():
+    """같은 부모 컬럼에 붙은 자식들은 행이 정렬된다. 경고는 소음이 된다."""
+    from tablefold.ir import FieldKind
+
+    result = _two_children_schema((("order_id", "order_id"),))
+    fields = [
+        f
+        for f in result.layer.model("orders").fields
+        if f.source.kind is FieldKind.AGGREGATED
+    ]
+
+    expansion = expand(
+        f"SELECT {', '.join(f.name for f in fields)} FROM orders",
+        result.layer,
+        result.graph,
+    )
+
+    assert expansion.warnings == ()

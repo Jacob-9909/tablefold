@@ -175,6 +175,14 @@ class ExpansionResult:
     fields_used: tuple[str, ...]
     joins_emitted: int
     joins_available: int
+    warnings: tuple[str, ...] = ()
+    """구조적으로는 옳지만 값의 의미를 주의해야 하는 상황.
+
+    대표 사례가 자식 집계 간 키 불일치다. 매출은 조직 입도, 계획은
+    조직×품목 입도로 미리 합쳐진 뒤 각자 부모에 붙으면, 나란히 비교한 행의
+    한쪽은 NULL 이다 — 에러도 아니고 경고 없는 치우친 답이다. 여기서 말해
+    주는 것이 화면과 수리 루프보다 먼저다.
+    """
 
     @property
     def joins_pruned(self) -> int:
@@ -213,6 +221,7 @@ def expand(
 
     ctes: list[tuple[str, exp.Select]] = []
     used_fields: list[str] = []
+    warnings: list[str] = []
     emitted = 0
     available = 0
 
@@ -254,6 +263,7 @@ def expand(
         used_fields.extend(f"{model.name}.{f.name}" for f in fields)
         emitted += join_count
         available += _available_join_count(model)
+        warnings.extend(_coverage_warnings(model, fields))
 
     rewritten = _rebind_model_references(statement, referenced)
     for name, select in ctes:
@@ -263,6 +273,7 @@ def expand(
         sql=rewritten.sql(dialect=dialect, pretty=pretty),
         models_used=tuple(m.name for m in referenced),
         fields_used=tuple(used_fields),
+        warnings=tuple(warnings),
         joins_emitted=emitted,
         joins_available=available,
     )
@@ -762,6 +773,45 @@ def _build_model_select(
         )
 
     return select, len(join_paths) + len(child_steps)
+
+
+def _coverage_warnings(
+    model: LogicalModel, fields: tuple[LogicalField, ...]
+) -> list[str]:
+    """투영된 자식 집계들이 부모의 **다른 컬럼**에 붙었을 때 주의를 남긴다.
+
+    매출 자식은 ``org_cd`` 로, 계획 자식은 ``org_cd + item_cd`` 로 부모에
+    붙으면, 전자는 조직 하나에 한 행이지만 후자는 품목 수만큼 행이 갈라진다.
+    나란히 비교한 질문에서 두 값은 범위가 다른 숫자다 — 에러는 아니고, 경고
+    없는 치우침이다. 같은 부모 컬럼(자기 참조의 src/dst 처럼)에 붙은 둘은
+    정렬되므로 소음을 만들지 않는다.
+    """
+    signatures: dict[tuple[str, frozenset[str]], list[str]] = {}
+    for f in fields:
+        if f.filter_only or not f.source.path:
+            continue
+        if f.source.kind is not FieldKind.AGGREGATED:
+            continue
+        step = f.source.path[-1]
+        # 1:N 자식의 경로는 부모→자식 방향이다. 부모가 붙는 **자기 컬럼**이
+        # 범위를 결정한다 — from_table/from_columns 가 그것이다.
+        sig = (
+            step.from_table.lower(),
+            frozenset(c.lower() for c in step.from_columns),
+        )
+        signatures.setdefault(sig, []).append(f.name)
+
+    if len(signatures) <= 1:
+        return []
+    detail = "; ".join(
+        f"{table}.{'+'.join(sorted(cols))}: {', '.join(names[:3])}"
+        for (table, cols), names in sorted(signatures.items())
+    )
+    return [
+        f"{model.name}: 미리 합계 낸 자식들이 서로 다른 부모 컬럼에 붙어 "
+        f"범위가 다릅니다 ({detail}). 이들을 나란히 비교하면 한쪽이 더 넓은 "
+        "집계일 수 있습니다."
+    ]
 
 
 def _physical(table_name: str, graph: SchemaGraph) -> exp.Table:
