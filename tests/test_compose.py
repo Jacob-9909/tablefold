@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import pytest
@@ -455,3 +456,103 @@ def test_field_budget_still_works_when_no_prompt_budget_is_given(retail_graph):
     layer = compose(retail_graph, clustering, options=ComposeOptions(field_budget=60))
 
     assert layer.field_count == 60
+
+
+# ── 정보량 순 예산 경합 ───────────────────────────────────────────────────────
+#
+# "측정하라, 주장하지 말라" — 컬럼을 고르는 기준이 입력 순서가 아니라 잰 정보량이
+# 되도록 한다. 상수 컬럼과 만 값을 지닌 컬럼이 같은 우선순위에서 다툰다면 뒤쪽이
+# 이겨야 한다. 측정은 호출자의 몫이므로 여기서는 bits 사전을 직접 준다.
+
+
+@pytest.fixture
+def contended_graph():
+    """예산 경합을 벌일 후보만 남긴 한 장의 표.
+
+    키가 없어 외래 키 제외·집계 통로가 없고, 후보는 자체 컬럼(우선순위 0) 셋뿐이다.
+    컬럼 순서가 곧 비트 없는 상태의 줄서기다 — ``FLAG_YN`` 이 먼저 온다.
+    """
+    thing = PhysicalTable(
+        name="D_THING",
+        columns=(
+            column("FLAG_YN", "varchar(1)"),
+            column("ITEM_CD", "varchar(20)"),
+            column("GRP_NM", "varchar(50)"),
+        ),
+    )
+    return SchemaGraph.build(PhysicalSchema(tables=(thing,), foreign_keys=()))
+
+
+def _contend(graph: SchemaGraph, opts: ComposeOptions):
+    clustering = cluster(
+        graph,
+        profile_tables(graph),
+        policy=SelectionPolicy(max_areas=1),
+        selector=ExplicitSelector(("D_THING",)),
+    )
+    return compose(graph, clustering, options=opts)
+
+
+def test_higher_information_wins_budget_contention(contended_graph):
+    """같은 우선순위 안에서 예산 경합은 정보량 순이어야 한다.
+
+    예산 1에서 비트를 모르면 입력 순서 첫 컬럼이 이긴다(현재 동작 보존). 측정이
+    들어오면 값이 하나뿐인 플래그보다 만 값을 지닌 코드가 이긴다 — 설명할 내용이
+    많은 컬럼이 받을 질문도 많다. 같은 돈이라면 넓은 질문부터 열 수 있어야 한다.
+    """
+    plain = _contend(contended_graph, ComposeOptions(field_budget=1))
+    assert [f.source.column for f in plain.models[0].fields] == ["FLAG_YN"]
+
+    measured = _contend(
+        contended_graph,
+        ComposeOptions(
+            field_budget=1,
+            field_bits={("d_thing", "item_cd"): math.log2(10_000) + 1},
+        ),
+    )
+    assert [f.source.column for f in measured.models[0].fields] == ["ITEM_CD"]
+
+
+def test_unknown_bits_rank_after_known_ones(contended_graph):
+    """알려진 값이 하나라도 있으면 미측정 필드는 알려진 것들 뒤로 물러난다.
+
+    중앙값으로 끼워 넣으면 못 잰 컬럼을 "중간 정도는 안다"고 주장하는 꼴이 된다.
+    미측정은 미측정대로 원래 상대순서(``FLAG_YN`` → ``ITEM_CD``)를 유지한 채
+    뒤로 보낸다. 알려진 것이 하나도 없으면 아무것도 바꾸지 않는다.
+    """
+    measured = _contend(
+        contended_graph,
+        ComposeOptions(field_budget=99, field_bits={("d_thing", "grp_nm"): 3.0}),
+    )
+    assert [f.source.column for f in measured.models[0].fields] == [
+        "GRP_NM",
+        "FLAG_YN",
+        "ITEM_CD",
+    ]
+
+    # 근거가 전혀 없으면 재배치도 하지 않는다 — 빈 사전은 정렬 근거가 아니다.
+    untouched = _contend(
+        contended_graph, ComposeOptions(field_budget=99, field_bits={})
+    )
+    assert [f.source.column for f in untouched.models[0].fields] == [
+        "FLAG_YN",
+        "ITEM_CD",
+        "GRP_NM",
+    ]
+
+
+def test_fold_threads_field_bits_to_the_budget(tiny_schema):
+    """``fold()`` 까지 옵션이 통과하는지. 배분 규칙은 compose 쪽에서 이미 본다."""
+    from tablefold.fold import fold
+
+    result = fold(
+        tiny_schema,
+        selector=ExplicitSelector(("orders",)),
+        policy=SelectionPolicy(max_areas=1),
+        field_budget=1,
+        include_aggregates=False,
+        field_bits={("orders", "placed_at"): math.log2(4_000) + 1},
+    )
+
+    orders = result.layer.model("orders")
+    assert [f.source.column for f in orders.fields] == ["placed_at"]

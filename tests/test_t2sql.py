@@ -542,3 +542,130 @@ def test_an_explicitly_chosen_dialect_survives():
 
     assert dialect_for_live("duckdb") == "duckdb"
     assert dialect_for_live("tsql") == "tsql"
+
+
+# ── 실행 검증 ────────────────────────────────────────────────────────────────
+
+
+def test_an_execution_failure_is_repaired_with_the_runtime_error(star_fold):
+    """확장 통과 ≠ 실행 가능. 데이터베이스가 거부하면 그 오류를 들고 다시 쓴다."""
+    prompts: list[str] = []
+    executed: list[str] = []
+
+    def completer(prompt: str) -> str:
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return "```sql\nSELECT SALES_AMT / 0 FROM F_SALES\n```"
+        return "```sql\nSELECT SALES_AMT FROM F_SALES\n```"
+
+    def executor(sql: str) -> None:
+        executed.append(sql)
+        if "/ 0" in sql:
+            raise ValueError("division by zero")
+
+    result = TextToSQLEngine(
+        star_fold,
+        completer=completer,
+        route=False,
+        executor=executor,
+    ).generate("매출")
+
+    assert result.repairs == 0
+    assert result.executions == 1
+    assert result.calls == 2
+    assert [a.stage for a in result.attempts] == ["execute", "write (full layer)"]
+    assert not result.attempts[0].ok
+    assert result.attempts[0].error == "division by zero"
+    assert result.attempts[1].ok
+    # 검증자는 물리 SQL 을 받았다.
+    assert executed[0].startswith("WITH tf__F_SALES")
+    # 수리 프롬프트는 거부한 물리 SQL 과 실행 오류를 함께 들고 간다.
+    assert "division by zero" in str(prompts[1])
+    assert "SALES_AMT / 0" in str(prompts[1])
+
+
+def test_execution_failures_respect_max_attempts_and_raise(star_fold):
+    """실행 검증도 수리 루프 안이다 — 한도를 넘으면 조용히 넘기지 않고 올린다."""
+    calls: list[str] = []
+
+    def executor(sql: str) -> None:
+        calls.append(sql)
+        raise ValueError("division by zero")
+
+    engine = TextToSQLEngine(
+        star_fold,
+        completer=replying("```sql\nSELECT SALES_AMT / 0 FROM F_SALES\n```"),
+        max_attempts=2,
+        route=False,
+        executor=executor,
+    )
+
+    with pytest.raises(GenerationError) as raised:
+        engine.generate("매출")
+
+    assert all(a.stage == "execute" for a in raised.value.attempts)
+    assert len(calls) == 2
+    assert all(not a.ok for a in raised.value.attempts)
+
+
+def test_without_an_executor_an_expanded_answer_is_returned_untouched(star_fold):
+    """검증자가 없으면 예전과 같다 — 확장 통과가 곧 최종 답이다.
+
+    실행하면 반드시 깨질 SQL 도 그대로 나간다. 기본 동작이 조용히 바뀌면
+    기존 호출자의 호출 횟수·비용이 몰래 늘어난다.
+    """
+    engine = TextToSQLEngine(
+        star_fold,
+        completer=replying("```sql\nSELECT SALES_AMT / 0 FROM F_SALES\n```"),
+        route=False,
+    )
+
+    result = engine.generate("매출")
+
+    assert result.executions == 0
+    assert len(result.attempts) == 1
+    assert result.calls == 1
+    assert "/ 0" in result.physical_sql
+
+
+# ── 공급자 요청 본문 ─────────────────────────────────────────────────────────
+
+
+def _prompt():
+    from tablefold.t2sql.prompt import Prompt
+
+    return Prompt(cached="접두사", fresh="질문")
+
+
+def test_both_providers_pin_temperature_to_zero():
+    """온도를 생략하면 공급자 기본값이 적용되어 벤치마크가 흔들린다."""
+    from tablefold.t2sql.provider import anthropic_kwargs, openai_kwargs
+
+    anthropic = anthropic_kwargs(_prompt(), model="claude-sonnet-5", max_tokens=2048)
+    openai = openai_kwargs(_prompt(), model="gpt-4o", max_tokens=2048)
+
+    assert anthropic["temperature"] == 0
+    assert openai["temperature"] == 0
+    # 질문은 접두사 뒤에 있어야 캐시가 산다 — 헬퍼가 순서를 어기면 안 된다.
+    assert anthropic["messages"] == [{"role": "user", "content": "질문"}]
+    assert anthropic["system"][0]["text"] == "접두사"
+
+
+def test_newer_openai_models_ask_for_max_completion_tokens():
+    """신형 모델(o 계열 · gpt-5 계열)은 ``max_tokens`` 를 아예 거부한다."""
+    from tablefold.t2sql.provider import openai_kwargs
+
+    reasoning = openai_kwargs(_prompt(), model="o4-mini", max_tokens=2048)
+    gpt5 = openai_kwargs(_prompt(), model="gpt-5", max_tokens=2048)
+    legacy = openai_kwargs(_prompt(), model="gpt-4o", max_tokens=2048)
+    prefixed = openai_kwargs(
+        _prompt(), model="openrouter/openai/gpt-4o", max_tokens=2048
+    )
+
+    assert reasoning["max_completion_tokens"] == 2048
+    assert "max_tokens" not in reasoning
+    assert gpt5["max_completion_tokens"] == 2048
+    # 옛 모델은 그대로다. 벤더 접두사가 ``o`` 로 시작한다고 신형 취급하면 안 된다.
+    assert legacy["max_tokens"] == 2048
+    assert "max_completion_tokens" not in legacy
+    assert prefixed["max_tokens"] == 2048

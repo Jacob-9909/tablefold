@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from tablefold.fold import FoldResult
@@ -61,6 +62,14 @@ class Preparation:
     (:mod:`tablefold.relate.consolidate`). 0 이면 합쳐진 것이 없다는 뜻이다.
     """
 
+    cardinality_measured: int = 0
+    """데이터에서 읽은 (표, 컬럼) 카디널리티 수. 0 이면 측정이 없었다는 뜻이다.
+
+    측정이 있었는지는 읽는 쪽이 알아야 한다 — 같은 예산이라도 컬럼을 고른 기준이
+    "입력 순서"였는지 "정보량"이었는지는 신뢰가 다르다. 못 잰 것을 잰 것처럼
+    보고하지 않기 위해 0 은 거짓이 아니라 "안 했다"로 읽는다.
+    """
+
     @property
     def note(self) -> str:
         layer = self.result.layer
@@ -70,10 +79,15 @@ class Preparation:
             if self.consolidated_tables
             else ""
         )
+        counted = (
+            f" · 카디널리티 {self.cardinality_measured} 측정"
+            if self.cardinality_measured
+            else ""
+        )
         return (
             f"{len(layer.models)}개 모델 · {layer.field_count}개 필드 · "
             f"외래 키 선언 {self.declared_keys} + 복구 {self.recovered_keys}"
-            f"({how}){merged}"
+            f"({how}){merged}{counted}"
         )
 
 
@@ -89,6 +103,7 @@ def prepare_for_questions(
     consolidate_partitions: bool = True,
     monthly_summaries: bool = False,
     dedupe_equivalents: bool = False,
+    measure_cardinality: bool = False,
 ) -> Preparation:
     """질문에 답할 수 있게 접는다.
 
@@ -119,17 +134,31 @@ def prepare_for_questions(
     ``dedupe_equivalents`` 는 값이 항상 함께 결정되는 컬럼 묶음을 찾아 레이어에서
     별칭을 접는다 (:mod:`tablefold.relate.equivalence`). 판정이 데이터라 커서가
     필요하고, 없으면 조용히 건너뛴다 — 이름으로 지어내지 않겠다는 약속이다.
+
+    ``measure_cardinality`` 는 표당 한 번의 질의로 전체 컬럼의 distinct 를 일괄
+    읽어(:func:`tablefold.report.information._cardinalities` 와 같은 방식) 예산
+    경합에 정보량 비트를 얹는다. 접기 **전에** 읽는 이유는 이 값이 배분의 입력이
+    되기 때문이다 — 접힌 뒤에 재봐야 이미 고른 뒤다. 커서가 없으면 켜 두어도
+    아무것도 지어내지 않는다. 비공개 함수를 가져오는 것은
+    :mod:`tablefold.report.answerable` 가 fidelity 의 ``_key_columns`` 를 쓰는
+    것과 같은, 이 저장소의 통과 패턴이다.
     """
     declared = sum(1 for fk in schema.foreign_keys if not fk.inferred)
     recovered = already_recovered
     validated = already_recovered > 0 and cursor is None
     consolidated = 0
+    snapshot_names: frozenset[str] = frozenset()
 
     if consolidate_partitions:
         from tablefold.relate.consolidate import consolidate_snapshots
 
-        schema, reports = consolidate_snapshots(schema)
+        schema, reports = consolidate_snapshots(
+            schema, cursor=cursor, dialect=dialect_for_live("")
+        )
         consolidated = len(reports)
+        # 스냅샷형(잔고 누적 위험)은 요약 합성에서 뺀다 — SUM 하면 잔고가
+        # 기간 수만큼 더해진다. 판정 근거와 함께 경고로 남는다.
+        snapshot_names = frozenset(r.virtual.name for r in reports if r.snapshot_like)
 
     if recover:
         if cursor is not None:
@@ -147,13 +176,28 @@ def prepare_for_questions(
     if monthly_summaries:
         from tablefold.relate.synthesize import add_monthly_summaries
 
-        schema, _ = add_monthly_summaries(schema)
+        schema, _ = add_monthly_summaries(schema, exclude=snapshot_names)
+
+    field_bits: dict[tuple[str, str], float] | None = None
+    cardinality_measured = 0
+    if measure_cardinality and cursor is not None:
+        # 표당 **한 번의 질의**로 그 표 전체 컬럼의 distinct 를 읽는다. 컬럼마다
+        # 묻으면 왕복이 컬럼 수만큼 늘고, 접은 뒤에 재면 이미 예산은 다 쓰인 뒤다.
+        from tablefold.report.information import _cardinalities
+
+        counts, _unmeasured = _cardinalities(schema, cursor, LIVE_DIALECT)
+        cardinality_measured = len(counts)
+        if counts:
+            # 상수 컬럼도 설명에는 한 칸을 쓴다 — log2(1)=0 이면 공짜가 되는데,
+            # 화면에서 지우는 것조차 공짜가 아니다(information.measure 와 같은 판단).
+            field_bits = {pair: math.log2(max(d, 1)) + 1 for pair, d in counts.items()}
 
     result = fold_star_schema(
         schema,
         max_hops=max_hops,
         prompt_budget=prompt_budget,
         infer_missing_keys=False,
+        field_bits=field_bits,
     )
 
     if dedupe_equivalents and cursor is not None:
@@ -177,4 +221,5 @@ def prepare_for_questions(
         recovered_keys=recovered,
         validated=validated,
         consolidated_tables=consolidated,
+        cardinality_measured=cardinality_measured,
     )

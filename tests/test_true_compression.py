@@ -22,12 +22,14 @@ from tablefold.ir import (
     PhysicalSchema,
     PhysicalTable,
 )
+from tablefold.relate.consolidate import consolidate_snapshots
 from tablefold.relate.equivalence import (
     dedupe_fields,
     find_equivalents,
 )
 from tablefold.relate.synthesize import add_monthly_summaries
 from tablefold.report.information import measure
+from tablefold.t2sql.prepare import prepare_for_questions
 
 
 def col(name, type_="bigint"):
@@ -453,3 +455,129 @@ def test_router_catalog_points_trend_questions_at_summaries():
     # 상세 모델에는 붙지 않는다. 모든 모델에 붙으면 힌트가 아니라 소음이다.
     detail_block = catalog.split("### F_SALES", 1)[-1]
     assert "월 입도 요약" not in detail_block
+
+
+# ── 스냅샷-vs-델타 판정 ───────────────────────────────────────────────────────
+
+
+def _partition_schema(pk: str) -> PhysicalSchema:
+    """월별 파티션 둘. pk 로 실체 키 구성을 바꿔가며 시험한다."""
+    tables = [
+        PhysicalTable(
+            name=f"F_BAL_{ym}",
+            columns=(
+                col("YYYYMM", "varchar(6)"),
+                col("ACCT_CD", "varchar"),
+                col("BALANCE", "numeric"),
+            ),
+            primary_key=(pk, "ACCT_CD"),
+        )
+        for ym in ("202507", "202508")
+    ]
+    return PhysicalSchema(tables=tuple(tables), foreign_keys=())
+
+
+def test_identical_entity_sets_across_partitions_flag_snapshot():
+    """전체 계좌가 매달 재등장하면 잔고 스냅샷이다. SUM 하면 누적된다."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE F_BAL_202507 (
+            YYYYMM TEXT, ACCT_CD TEXT, BALANCE NUMERIC,
+            PRIMARY KEY (YYYYMM, ACCT_CD));
+        CREATE TABLE F_BAL_202508 (
+            YYYYMM TEXT, ACCT_CD TEXT, BALANCE NUMERIC,
+            PRIMARY KEY (YYYYMM, ACCT_CD));
+        """
+    )
+    rows = [(f"20250{i}", f"A{j:02d}", 100.0) for i in (7, 8) for j in range(1, 11)]
+    conn.executemany("INSERT INTO F_BAL_202507 VALUES (?,?,?)", rows[:10])
+    conn.executemany("INSERT INTO F_BAL_202508 VALUES (?,?,?)", rows[10:])
+    schema = _partition_schema("YYYYMM")
+
+    _, reports = consolidate_snapshots(schema, cursor=conn.cursor(), dialect="sqlite")
+
+    assert reports[0].snapshot_like is True
+    assert reports[0].entity_key_overlap == pytest.approx(1.0)
+    conn.close()
+
+
+def test_partial_entity_overlap_reads_as_delta():
+    """매달 거래한 고객만 등장하는 델타는 겹침이 낮다. 요약이 만들어져야 한다."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE F_BAL_202507 (
+            YYYYMM TEXT, ACCT_CD TEXT, BALANCE NUMERIC,
+            PRIMARY KEY (YYYYMM, ACCT_CD));
+        CREATE TABLE F_BAL_202508 (
+            YYYYMM TEXT, ACCT_CD TEXT, BALANCE NUMERIC,
+            PRIMARY KEY (YYYYMM, ACCT_CD));
+        """
+    )
+    # 7월엔 10계좌, 8월엔 완전히 다른 10계좌 — 유사도 0.
+    conn.executemany(
+        "INSERT INTO F_BAL_202507 VALUES (?,?,?)",
+        [("202507", f"A{j:02d}", 1.0) for j in range(1, 11)],
+    )
+    conn.executemany(
+        "INSERT INTO F_BAL_202508 VALUES (?,?,?)",
+        [("202508", f"B{j:02d}", 1.0) for j in range(1, 11)],
+    )
+    schema = _partition_schema("YYYYMM")
+
+    merged, reports = consolidate_snapshots(
+        schema, cursor=conn.cursor(), dialect="sqlite"
+    )
+
+    assert reports[0].snapshot_like is False
+    assert reports[0].entity_key_overlap == 0.0
+    # 델타니까 월 요약도 안전하게 만들 수 있다.
+    _, built = add_monthly_summaries(merged, exclude=_excluded(reports))
+    assert len(built) == 1
+    conn.close()
+
+
+def test_without_a_cursor_the_verdict_is_honestly_unknown():
+    """값을 못 보면서 스냅샷이라 주장하면 측정의 취지가 사라진다."""
+    schema = _partition_schema("YYYYMM")
+
+    _, reports = consolidate_snapshots(schema)
+
+    assert reports[0].snapshot_like is None
+    assert reports[0].entity_key_overlap is None
+
+
+def test_prepare_suppresses_summaries_for_snapshot_ledgers():
+    """스냅샷형 원장은 요약을 만들지 않는다 — 틀린 답을 거절하는 것."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE F_BAL_202507 (
+            YYYYMM TEXT, ACCT_CD TEXT, BALANCE NUMERIC,
+            PRIMARY KEY (YYYYMM, ACCT_CD));
+        CREATE TABLE F_BAL_202508 (
+            YYYYMM TEXT, ACCT_CD TEXT, BALANCE NUMERIC,
+            PRIMARY KEY (YYYYMM, ACCT_CD));
+        INSERT INTO F_BAL_202507 VALUES ('202507','A01',100);
+        INSERT INTO F_BAL_202508 VALUES ('202508','A01',200);
+        """
+    )
+    schema = _partition_schema("YYYYMM")
+
+    prep = prepare_for_questions(
+        schema,
+        cursor=conn.cursor(),
+        consolidate_partitions=True,
+        monthly_summaries=True,
+    )
+
+    summary_names = [
+        m.name for m in prep.result.layer.models if m.name.startswith("V_")
+    ]
+    assert summary_names == []  # 스냅샷형은 SUM 요약 금지
+    conn.close()
+
+
+def _excluded(reports):
+    return frozenset(r.virtual.name for r in reports if r.snapshot_like)

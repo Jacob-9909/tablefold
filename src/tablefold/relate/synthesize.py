@@ -170,8 +170,14 @@ def add_monthly_summaries(
     *,
     facts: tuple[str, ...] | None = None,
     max_measures: int = 8,
+    exclude: frozenset[str] = frozenset(),
 ) -> tuple[PhysicalSchema, tuple[str, ...]]:
     """팩트 표마다 월 입도 요약 가상 테이블을 붙인 스키마.
+
+    ``exclude`` 는 요약을 만들지 않을 표 이름이다. 스냅샷형(월말 잔고) 원장이
+    여기 들어온다 — 그 행들을 월로 묶어 ``SUM`` 하면 같은 계좌의 잔고가 기간
+    수만큼 누적된다. 묶는 대신 건너뛴다는 것은 "답을 포기"가 아니라
+    "틀린 답을 거절"이다.
 
     ``facts`` 를 비우면 나가는 키가 있고 참조당하지 않는 표(= 전형적 팩트)를
     고른다. 가상 표도 후보다 — 파티션 결합으로 합쳐진 원장의 월 추세를 묻는
@@ -209,6 +215,8 @@ def add_monthly_summaries(
     built: list[str] = []
 
     for fact_name in facts:
+        if fact_name in exclude:
+            continue
         fact = schema.table(fact_name)
         if fact is None:
             continue

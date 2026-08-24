@@ -38,6 +38,11 @@ from tablefold.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTab
 # 최소 멤버 수. 혼자 있는 "스냅샷"은 스냅샷이 아니라 그냥 표다.
 MIN_MEMBERS = 2
 
+# 실체 키 집합 유사도가 이 이상이면 스냅샷형으로 판정한다. 델타는 매달 거래한
+# 고객만 등장하므로 유사도가 낮고, 월말 잔고는 전체 계좌가 매달 다시 나타나므로
+# 1 에 수렴한다. 0.9 는 "한 달 빠진 계좌 몇 개"를 허용하는 여유다.
+SNAPSHOT_OVERLAP_THRESHOLD = 0.9
+
 # (접미사 규칙, 종류, 판별 컬럼 이름). 연도는 상식 범위로 걸러고 월·일 자리는
 # 자릿수로만 본다 — 시그니처가 같다는 조건이 이미 절반을 걸러 준다.
 _PERIOD_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
@@ -68,6 +73,17 @@ class Consolidation:
     dropped_incoming_edges: int = 0
     """멤버를 참조하던 엣지 수. 스냅샷을 참조하는 표는 드물고, 누가 참조했는지에
     따라 의미가 달라져 여기서 추정하지 않는다."""
+    snapshot_like: bool | None = None
+    """월말 스냅샷(잔고형)으로 보이는가.
+
+    ``None`` 은 판정하지 못했다는 뜻이다 — 커서가 없거나 실체 키를 못 찾은 경우.
+    스냅샷형인데 ``SUM`` 하면 잔고가 기간 수만큼 누적된다. 이 값이 참이면 요약
+    모델 합성이 이 표를 건너뛰고, 읽는 쪽에 경고로 남는다. 거짓은 "델타로
+    관측됐다"이지 "확실히 델타다"가 아니다 — 견본 두 장의 집합 유사도다.
+    """
+
+    entity_key_overlap: float | None = None
+    """판정 근거. 파티션 간 실체 키 집합의 Jaccard 유사도 (0~1)."""
 
 
 def partition_of(table_name: str) -> tuple[str, str, str] | None:
@@ -85,12 +101,22 @@ def partition_of(table_name: str) -> tuple[str, str, str] | None:
 
 def consolidate_snapshots(
     schema: PhysicalSchema,
+    *,
+    cursor=None,
+    dialect: str = "tsql",
 ) -> tuple[PhysicalSchema, tuple[Consolidation, ...]]:
     """구조가 같은 기간 파티션 표를 가상 테이블 한 벌로 합친 스키마.
 
     합쳐진 표의 이름은 원본에서 접미사를 뗀 것(``F_LEDGER_202506`` 들 →
     ``F_LEDGER``)이다. 그 이름이 이미 살아 있는 표가 쓰고 있으면 ``_ALL`` 을
     붙여 물러난다 — 원본을 덮는 편이 합치는 것보다 나쁘다.
+
+    ``cursor`` 를 주면 묶음마다 **스냅샷형 여부**를 값으로 판정한다. 월별 표는
+    두 종류다 — 그 달의 거래(델타)와 그 달 말의 잔고(스냅샷). 델타는 합쳐서
+    ``SUM`` 해도 맞지만, 스냅샷을 합쳐 더하면 같은 계좌의 잔고가 기간 수만큼
+    누적된다. 판정은 실체 키(기본 키에서 기간 컬럼을 뺀 것) 집합이 파티션
+    사이에 얼마나 겹치는지로 한다 — 델타는 매달 부분 고객만 거래하고, 스냅샷은
+    전체 계좌가 매달 재등장한다. 임계값은 0.9 다.
     """
     groups: dict[tuple, list[PhysicalTable]] = {}
     for table in schema.tables:
@@ -102,7 +128,9 @@ def consolidate_snapshots(
         groups.setdefault(signature, []).append(table)
 
     taken = {t.name.lower() for t in schema.tables}
-    drafts: list[tuple[str, PhysicalTable, list[PhysicalTable]]] = []
+    drafts: list[
+        tuple[str, PhysicalTable, list[PhysicalTable], bool | None, float | None]
+    ] = []
     for (stem, _, _), members in sorted(groups.items()):
         if len(members) < MIN_MEMBERS:
             continue
@@ -135,7 +163,18 @@ def consolidate_snapshots(
             ),
             source_sql=_union_sql(ordered, disc_name),
         )
-        drafts.append((name, virtual, ordered))
+
+        overlap = None
+        snapshot_like = None
+        if cursor is not None:
+            entity_key = _entity_key_of(ordered[0])
+            if entity_key:
+                overlap = _entity_overlap(
+                    ordered, entity_key, cursor=cursor, dialect=dialect
+                )
+                if overlap is not None:
+                    snapshot_like = overlap >= SNAPSHOT_OVERLAP_THRESHOLD
+        drafts.append((name, virtual, ordered, snapshot_like, overlap))
 
     if not drafts:
         return schema, ()
@@ -150,6 +189,80 @@ def _signature(table: PhysicalTable) -> tuple[tuple[str, str], ...]:
     from tablefold.relate.graph import _type_class
 
     return tuple((c.name.lower(), _type_class(c.type)) for c in table.columns)
+
+
+def _entity_key_of(table: PhysicalTable) -> tuple[str, ...]:
+    """실체 키 — 기본 키에서 기간 컬럼을 뺀 것.
+
+    웨어하우스의 월말 스냅샷은 기본 키에 기간을 넣는 관례가 흔하다
+    (``F_STOCK`` 의 ``(YYYYMM, ORG_CD)``). 그 약속이 있으면 기간을 빼면 남는
+    것이 매달 재등장하는 실체다. 기본 키가 없거나 전부 기간 컬럼이면 실체를
+    특정할 수 없으므로 빈 튜플 — 판정 보류다.
+    """
+    from tablefold.relate.synthesize import _grain
+
+    if not table.primary_key:
+        return ()
+    kept = [
+        c
+        for c in table.primary_key
+        if _grain(next((x for x in table.columns if x.name.lower() == c.lower()), None))
+        is None
+    ]
+    return tuple(kept)
+
+
+def _entity_overlap(
+    members: list[PhysicalTable],
+    entity_key: tuple[str, ...],
+    *,
+    cursor,
+    dialect: str,
+) -> float | None:
+    """두 파티션의 실체 키 집합 Jaccard 유사도. 못 재면 ``None``.
+
+    견본은 두 장이면 충분하다 — 스냅샷은 모든 파티션이 서로 비슷해야 한다는
+    뜻이고, 두 장이 다르면 세 번째 이후를 볼 이유가 없다. 행 수 추정이 있는
+    쪽부터 고른다(작은 표 두 장이 값싸다).
+    """
+    from tablefold.relate.validate import quoted
+
+    probe = sorted(
+        members,
+        key=lambda t: (t.row_estimate is None, t.row_estimate or 0),
+    )[:2]
+    if len(probe) < 2:
+        return None
+
+    def distinct_set(table: PhysicalTable) -> str:
+        cols = ", ".join(quoted(c, dialect) for c in entity_key)
+        null_guard = " AND ".join(
+            f"{quoted(c, dialect)} IS NOT NULL" for c in entity_key
+        )
+        return (
+            f"SELECT DISTINCT {cols} FROM {quoted(table.name, dialect)} "
+            f"WHERE {null_guard}"
+        )
+
+    try:
+        cursor.execute(
+            f"SELECT COUNT(*) FROM ("
+            f"{distinct_set(probe[0])} INTERSECT {distinct_set(probe[1])}"
+            f") i"
+        )
+        row = cursor.fetchone()
+        inter = int(row[0]) if row and row[0] is not None else 0
+        cursor.execute(
+            f"SELECT COUNT(*) FROM ({distinct_set(probe[0])} UNION "
+            f"{distinct_set(probe[1])}) u"
+        )
+        row = cursor.fetchone()
+        union = int(row[0]) if row and row[0] is not None else 0
+    except Exception:  # noqa: BLE001 — 드라이버별 실패는 판정 보류다
+        return None
+    if union == 0:
+        return None
+    return inter / union
 
 
 def _sum_rows(members: list[PhysicalTable]) -> int | None:
@@ -200,16 +313,18 @@ def _unified_edges(
 
 def _rebuild(
     schema: PhysicalSchema,
-    drafts: list[tuple[str, PhysicalTable, list[PhysicalTable]]],
+    drafts: list[
+        tuple[str, PhysicalTable, list[PhysicalTable], bool | None, float | None]
+    ],
 ) -> tuple[PhysicalSchema, tuple[Consolidation, ...]]:
     """멤버 표를 빼고 가상 표를 넣고, 엣지를 다시 잇고, 장부를 남긴다."""
     from dataclasses import replace as _dc_replace
 
-    members = {t.name.lower() for _, _, ms in drafts for t in ms}
-    owner_of = {t.name.lower(): name for name, _, ms in drafts for t in ms}
+    members = {t.name.lower() for _, _, ms, _, _ in drafts for t in ms}
+    owner_of = {t.name.lower(): name for name, _, ms, _, _ in drafts for t in ms}
 
     tables = [t for t in schema.tables if t.name.lower() not in members]
-    tables += [virtual for _, virtual, _ in drafts]
+    tables += [virtual for _, virtual, _, _, _ in drafts]
 
     kept_fks: list[ForeignKey] = []
     incoming_by_virtual: dict[str, int] = {}
@@ -230,7 +345,7 @@ def _rebuild(
 
     final_fks = list(kept_fks)
     finished: list[Consolidation] = []
-    for name, virtual, member_tables in drafts:
+    for name, virtual, member_tables, snapshot_like, overlap in drafts:
         common_marks, dropped = _unified_edges(schema, member_tables)
         by_mark: dict[tuple, list[ForeignKey]] = {}
         for fk in schema.foreign_keys:
@@ -261,6 +376,8 @@ def _rebuild(
                 unified_edges=len(common_marks),
                 dropped_outgoing_edges=dropped,
                 dropped_incoming_edges=incoming_by_virtual.get(name, 0),
+                snapshot_like=snapshot_like,
+                entity_key_overlap=overlap,
             )
         )
 

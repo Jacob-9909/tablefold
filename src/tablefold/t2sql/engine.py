@@ -32,6 +32,12 @@
 
 **실패를 성공처럼 돌려주지 않는다.** 후퇴까지 다 쓰고도 확장되지 않으면
 :class:`GenerationError` 를 올리고 그 안에 시도 전부를 담는다.
+
+**실행 검증.** 확장이 통과해도 데이터베이스가 거부할 수 있다 — 0 나눔,
+방언 차이, 검사기가 모르는 제약. ``executor`` 를 주면 물리 SQL 을 실제로
+실행해 보고, 예외로 거부하면 그 메시지를 수리 프롬프트에 넣어 다시 쓰게
+한다. 화면에서 실행 실패가 사용자 앞에서 터지던 것을 생성 단계에서 끝내는
+것이다.
 """
 
 from __future__ import annotations
@@ -81,7 +87,7 @@ class Attempt:
     """한 번의 시도. 실패한 것도 남는다 — 왜 실패했는지가 결과의 일부다."""
 
     stage: str
-    """``route`` · ``write`` · ``write (full layer)``."""
+    """``route`` · ``write`` · ``write (full layer)`` · ``execute``."""
 
     prompt: Prompt
     raw_response: str
@@ -126,13 +132,26 @@ class GenerationResult:
 
     @property
     def calls(self) -> int:
-        """LLM 호출 횟수. 라우팅 1회 + 작성 1회가 정상이다."""
+        """LLM 호출 횟수. 라우팅 1회 + 작성 1회가 정상이다.
+
+        실행 검증에 걸린 시도도 한 번의 호출에서 나온 것이므로 여기에 센다 —
+        시도 하나가 호출 하나와 대응한다.
+        """
         return len(self.attempts)
 
     @property
     def repairs(self) -> int:
         """확장이 통과하기까지 고쳐 쓴 횟수."""
         return sum(1 for a in self.attempts if a.stage.startswith("write")) - 1
+
+    @property
+    def executions(self) -> int:
+        """실행 검증에서 걸려 되돌아온 횟수.
+
+        확장이 통과해도 데이터베이스가 거부할 수 있다. :attr:`repairs` 는 작성
+        단계의 고친 횟수만 세므로, 실행 검증이 몇 바퀴 돌았는지는 여기서 본다.
+        """
+        return sum(1 for a in self.attempts if a.stage == "execute")
 
     @property
     def usage(self) -> Usage:
@@ -161,6 +180,11 @@ class TextToSQLEngine:
 
     ``route`` 를 끄면 예전처럼 레이어 전체를 한 번에 담는다 — 모델이 두세 개뿐인
     작은 레이어에서는 라우팅 호출값이 아까울 수 있다.
+
+    ``executor`` 를 주면 확장이 통과한 물리 SQL 을 **실제로 실행** 해 본다.
+    검사기가 아는 것은 이름 목록뿐이고, 0 나눔이나 방언 차이는 실행해 봐야 안다.
+    호출은 SQL 문자열을 받아 성공하면 ``None``, 실패하면 무슨 예외든 던진다.
+    예외를 던지면 그 메시지를 수리 프롬프트에 넣어 확장 거부와 똑같이 고친다.
     """
 
     def __init__(
@@ -172,6 +196,7 @@ class TextToSQLEngine:
         dialect: str = "postgres",
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         route: bool = True,
+        executor: Callable[[str], None] | None = None,
     ) -> None:
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
@@ -181,6 +206,7 @@ class TextToSQLEngine:
         self.dialect = dialect
         self.max_attempts = max_attempts
         self.route = route and len(self.layer.models) > 1
+        self.executor = executor
         self._completer = completer or default_completer()
         self.examples = valid_examples(
             examples, self.layer, self.graph, dialect=dialect
@@ -214,9 +240,7 @@ class TextToSQLEngine:
                 return result
 
             if alternative:
-                result = self._write(
-                    question, attempts, model=alternative[0]
-                )
+                result = self._write(question, attempts, model=alternative[0])
                 if result is not None:
                     result = replace(result, rerouted_from=_name(chosen))
                     return result
@@ -351,25 +375,47 @@ class TextToSQLEngine:
                     error = str(exc)
                     fatal = isinstance(exc, FilterOnlyMisuse)
                 else:
-                    LOGGER.info(
-                        "   ✓ 확장 성공  모델 %s · 조인 %d/%d",
-                        ", ".join(expansion.models_used),
-                        expansion.joins_emitted,
-                        expansion.joins_available,
+                    exec_error = self._verify(expansion.sql)
+                    if exec_error is None:
+                        LOGGER.info(
+                            "   ✓ 확장 성공  모델 %s · 조인 %d/%d",
+                            ", ".join(expansion.models_used),
+                            expansion.joins_emitted,
+                            expansion.joins_available,
+                        )
+                        attempts.append(
+                            Attempt(stage, prompt, raw, logical, None, usage)
+                        )
+                        return GenerationResult(
+                            question=question,
+                            logical_sql=logical,
+                            physical_sql=expansion.sql,
+                            models_used=expansion.models_used,
+                            fields_used=expansion.fields_used,
+                            joins_emitted=expansion.joins_emitted,
+                            joins_available=expansion.joins_available,
+                            routed_to=_name(model) or routed_to,
+                            fell_back=fell_back,
+                            attempts=tuple(attempts),
+                        )
+                    # 확장은 통과했지만 데이터베이스가 거부했다. 시도는 execute
+                    # 단계로 남긴다 — :attr:`GenerationResult.repairs` 가 작성
+                    # 단계의 수정만 세도록 하기 위해서다. 실행 검증이 몇 바퀴
+                    # 돌았는지는 executions 가 센다.
+                    LOGGER.info("   ✗ 실행 거부  %s", exec_error[:120])
+                    attempts.append(
+                        Attempt("execute", prompt, raw, logical, exec_error, usage)
                     )
-                    attempts.append(Attempt(stage, prompt, raw, logical, None, usage))
-                    return GenerationResult(
-                        question=question,
-                        logical_sql=logical,
-                        physical_sql=expansion.sql,
-                        models_used=expansion.models_used,
-                        fields_used=expansion.fields_used,
-                        joins_emitted=expansion.joins_emitted,
-                        joins_available=expansion.joins_available,
-                        routed_to=_name(model) or routed_to,
-                        fell_back=fell_back,
-                        attempts=tuple(attempts),
+                    if abandon_if is not None and abandon_if(logical, exec_error):
+                        return None
+                    # 고칠 대상은 검사기를 통과한 물리 SQL 이다. 실행이 거부한
+                    # 그 문자열을 그대로 돌려준다.
+                    prompt = build_repair_prompt(
+                        base,
+                        rejected_sql=expansion.sql,
+                        error=exec_error,
                     )
+                    continue
 
             LOGGER.info("   ✗ 거부  %s", (error or "")[:120])
             attempts.append(Attempt(stage, prompt, raw, logical, error, usage, fatal))
@@ -385,6 +431,21 @@ class TextToSQLEngine:
         return None
 
     # ── 잡일 ─────────────────────────────────────────────────────────────────
+
+    def _verify(self, physical_sql: str) -> str | None:
+        """실행 검증. 통과하면 ``None``, 거부하면 오류 메시지.
+
+        검증자가 없으면 아무것도 묻지 않는다 — 확장 통과가 곧 최종 답인 예전
+        동작이다. 예외 메시지가 빈 문자열이면 시도가 ``ok`` 로 둔갑하므로
+        예외 이름으로 대신한다.
+        """
+        if self.executor is None:
+            return None
+        try:
+            self.executor(physical_sql)
+        except Exception as exc:  # noqa: BLE001 — 무슨 예외든 실행 실패다
+            return str(exc) or type(exc).__name__
+        return None
 
     def _call(self, prompt: Prompt) -> str:
         return self._completer(prompt)

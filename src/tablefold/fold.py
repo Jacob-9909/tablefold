@@ -62,6 +62,7 @@ def fold(
     include_aggregates: bool = True,
     prefix_joined_fields: bool = True,
     expose_child_filters: bool = False,
+    field_bits: dict[tuple[str, str], float] | None = None,
 ) -> FoldResult:
     """Fold a physical schema into as few wide logical models as ``policy`` allows.
 
@@ -84,6 +85,10 @@ def fold(
     by default because a schema with no declared foreign keys yields no graph,
     and therefore no fold at all — and stripped constraints are the normal state
     of a restored backup rather than an edge case.
+
+    ``field_bits`` 는 측정된 정보량((소문자 표, 소문자 컬럼) → 비트)으로, 주면
+    같은 우선순위 안에서의 예산 경합이 정보량 순으로 갈린다. 측정은 호출자의
+    몫이다 — 이 함수는 커서를 만지지 않는다.
     """
     inferred = infer_foreign_keys(schema) if infer_missing_keys else ()
     enriched = (
@@ -112,6 +117,7 @@ def fold(
             include_aggregates=include_aggregates,
             prefix_joined_fields=prefix_joined_fields,
             expose_child_filters=expose_child_filters,
+            field_bits=field_bits,
         ),
     )
 

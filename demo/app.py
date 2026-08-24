@@ -652,6 +652,17 @@ def _resolve_chat_dialect(source: str, requested: str) -> str:
     return requested or "postgres"
 
 
+def _live_executor(sql: str) -> None:
+    """생성된 SQL 을 답변 전에 실제 데이터베이스에 실행해 본다.
+
+    ``live.execute_query`` 는 실패를 예외가 아니라 상태 딕셔너리로 돌려주므로,
+    여기서 상태를 예외로 바꿔 준다 — 수리 루프는 예외로만 실패를 안다.
+    """
+    result = live.execute_query(sql)
+    if result.get("status") != "success":
+        raise RuntimeError(result.get("error") or f"실행 실패: {result.get('status')}")
+
+
 class AutoTuneRequest(BaseModel):
     source: str = "ddl"
     ddl: str = ""
@@ -805,6 +816,14 @@ def run_chat(req: ChatRequest) -> dict[str, Any]:
             # 만든 SQL 을 그대로 이 데이터베이스에 실행한다. 생성 방언과 실행
             # 대상이 어긋나면 문법 오류로 죽는다.
             dialect=_resolve_chat_dialect(req.source, req.dialect),
+            # 붙을 수 있을 때만 실행 검증을 한다. 예제(DDL) 소스는 데이터베이스가
+            # 없으므로 확장 통과가 곧 최종 답이다. 접속이 닫혔으면 검증자 없이
+            # 진행한다 — 없는 것을 있는 척하지 않는다.
+            executor=(
+                _live_executor
+                if req.source in ("live", "financial") and live.available()
+                else None
+            ),
         )
 
         gen_res = engine.generate(req.question)

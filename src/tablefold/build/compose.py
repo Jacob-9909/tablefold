@@ -69,6 +69,19 @@ class ComposeOptions:
     (NL2SQL 최대 모델 86필드, retail 최대 62필드로 어느 상한에도 안 닿는다).
     """
 
+    field_bits: dict[tuple[str, str], float] | None = None
+    """(소문자 표 이름, 소문자 컬럼 이름) → 정보량 비트(``log2(distinct) + 1``).
+
+    주면 예산 경합이 같은 우선순위 안에서 정보량 순으로 갈린다(:func:`_allocate`).
+    값이 하나뿐인 컬럼과 만 개의 값을 지닌 컬럼이 같은 자리에서 다툰다면 뒤쪽이
+    이겨야 한다 — 설명할 내용의 크기가 곧 그 컬럼이 받을 질문의 폭이다.
+
+    측정은 호출자의 몫이다(:func:`tablefold.report.information._cardinalities`
+    참고). 커서 없이 distinct 를 지어내면 측정으로 결정하겠다는 이 옵션의 취지가
+    사라진다. frozen 데이터클래스라 사전을 생성 때 넣으며, 넣은 뒤로는 호출자가
+    그 사전을 소유한다.
+    """
+
     include_foreign_key_columns: bool = False
     include_aggregates: bool = True
 
@@ -489,9 +502,13 @@ def _allocate(
         expected = sum(len(d.candidates) for d in drafts)
         lost = expected - dropped
         if lost:
-            notes.append(
-                f"filter-only channels dropped by name collisions: {lost}"
-            )
+            notes.append(f"filter-only channels dropped by name collisions: {lost}")
+
+    if opts.field_bits:
+        # 예산 경합은 같은 우선순위 안에서 정보량 순이어야 한다. 위치 기준
+        # 라운드로빈은 그대로 두고, 각 (모델, 우선순위) 칸 안의 줄서기만
+        # 다시 세운다 — 라운드로빈이 굶기지 않게 하는 성질은 훼손하지 않는다.
+        resolved = [_information_first(fields, opts.field_bits) for fields in resolved]
 
     queue: list[tuple[int, int, int, LogicalField]] = []
     for index, fields in enumerate(resolved):
@@ -530,6 +547,49 @@ def _allocate(
         )
         for draft, fields in zip(drafts, kept, strict=True)
     )
+
+
+def _information_first(
+    fields: list[tuple[int, LogicalField]],
+    bits: dict[tuple[str, str], float],
+) -> list[tuple[int, LogicalField]]:
+    """우선순위가 같은 구간 안에서만 후보를 정보량 내림차순으로 다시 세운다.
+
+    예산 경합은 같은 우선순위 안에서 정보량 순이어야 한다. 값이 하나뿐인 컬럼과
+    만 개의 서로 다른 값을 지닌 컬럼이 같은 자리에서 다툰다면 뒤쪽이 이겨야
+    한다 — 설명할 내용의 크기가 곧 그 컬럼이 받을 질문의 폭이다. 우선순위가
+    다른 사이는 건드리지 않는다. 정보량이 아무리 커도 3홉 조인이 자체 컬럼을
+    앞지르면 입도의 설명력이 무너진다.
+
+    측정되지 않은 필드는 알려진 것이 하나라도 있으면 알려진 것들 **뒤** 에서
+    원래 상대순서를 유지한다. 중앙값으로 끼워 넣는 선택지는 버렸다 — 못 잰
+    것을 "중간 정도는 안다"고 주장하면 측정으로 결정하겠다는 이 정렬의 취지가
+    사라진다. 집계 통로(``column="*"``)와 이름이 없는 짝은 어차피 bits 에
+    없으므로 미측정 취급이다. 알려진 것이 하나도 없으면 재배치하지 않는다 —
+    근거 없이 입력 순서를 바꾸는 것은 개선이 아니라 소음이다.
+    """
+    ranked: list[tuple[int, LogicalField]] = []
+    start = 0
+    while start < len(fields):
+        priority = fields[start][0]
+        end = start + 1
+        while end < len(fields) and fields[end][0] == priority:
+            end += 1
+        group = fields[start:end]
+        scored = [
+            (index, bits.get((f.source.table.lower(), f.source.column.lower())))
+            for index, (_, f) in enumerate(group)
+        ]
+        known = [(v, i) for i, v in scored if v is not None]
+        if known:
+            # stable sort — 비트가 같으면 원래 순서를 유지한다.
+            known.sort(key=lambda pair: -pair[0])
+            order = [i for _, i in known]
+            order.extend(i for i, v in scored if v is None)
+            group = [group[i] for i in order]
+        ranked.extend(group)
+        start = end
+    return ranked
 
 
 def _deduplicate(

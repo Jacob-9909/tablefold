@@ -52,6 +52,60 @@ DEFAULT_MAX_TOKENS = 2048
 # 라우팅 답은 모델 이름 하나다.
 ROUTER_MAX_TOKENS = 32
 
+# 벤치마크 재현성. 온도를 생략하면 공급자 기본값(대개 1)이 적용되어 같은
+# 프롬프트가 실행마다 다른 SQL 을 내고, 흔들리는 숫자는 측정이 아니라 추론이
+# 된다. 결정적 동작을 비결정적 동작보다 선호하는 것이 이 저장소의 원칙이다.
+DETERMINISTIC_TEMPERATURE = 0
+
+
+def anthropic_kwargs(prompt: Prompt, *, model: str, max_tokens: int) -> dict:
+    """Anthropic Messages API 요청 본문. 순수 함수다.
+
+    SDK 호출 안에 이 값을 인라인으로 박아 두면 테스트가 온도와 캐시 설정을
+    볼 수 없었다. 여기서 만들고 completer 는 전달만 한다.
+    """
+    return {
+        "model": model,
+        "max_tokens": max_tokens,
+        # 같은 프롬프트는 같은 답을 내야 한다 — 생략하면 공급자 기본값이
+        # 적용되어 라우팅·작성이 실행마다 흔들린다.
+        "temperature": DETERMINISTIC_TEMPERATURE,
+        # 캐시 breakpoint. system 은 messages 보다 먼저 렌더되므로 여기 붙이면
+        # 접두사 전체가 캐시되고, 질문은 뒤에 있어 접두사를 바꾸지 않는다.
+        "system": [
+            {
+                "type": "text",
+                "text": prompt.cached,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        "messages": [{"role": "user", "content": prompt.fresh}],
+    }
+
+
+def openai_kwargs(prompt: Prompt, *, model: str, max_tokens: int) -> dict:
+    """OpenAI 챗 완성 요청 본문. 순수 함수다.
+
+    신형 추론 모델(o 계열, gpt-5 계열)은 ``max_tokens`` 를 아예 거부하고
+    ``max_completion_tokens`` 만 받는다. 보내고 실패한 뒤 재시도하는 대신
+    이름만 보고 미리 고른다. 벤더 접두사(``openrouter/openai/gpt-4o`` 같은)
+    뒷부분을 기준으로 판단한다 — 접두사째로 보면 ``o`` 로 시작해 버린다.
+    """
+    bare = model.rsplit("/", 1)[-1]
+    token_kwarg = (
+        "max_completion_tokens" if bare.startswith(("o", "gpt-5")) else "max_tokens"
+    )
+    return {
+        "model": model,
+        token_kwarg: max_tokens,
+        # 같은 프롬프트는 같은 답을 내야 한다 — :func:`anthropic_kwargs` 참고.
+        "temperature": DETERMINISTIC_TEMPERATURE,
+        "messages": [
+            {"role": "system", "content": prompt.cached},
+            {"role": "user", "content": prompt.fresh},
+        ],
+    }
+
 
 @dataclass(frozen=True)
 class Usage:
@@ -116,18 +170,7 @@ class AnthropicCompleter(_Recording):
 
     def __call__(self, prompt: Prompt) -> str:
         message = self._client.messages.create(
-            model=self._model,
-            max_tokens=self._max_tokens,
-            # 캐시 breakpoint. system 은 messages 보다 먼저 렌더되므로 여기 붙이면
-            # 접두사 전체가 캐시되고, 질문은 뒤에 있어 접두사를 바꾸지 않는다.
-            system=[
-                {
-                    "type": "text",
-                    "text": prompt.cached,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[{"role": "user", "content": prompt.fresh}],
+            **anthropic_kwargs(prompt, model=self._model, max_tokens=self._max_tokens)
         )
         usage = message.usage
         self._last = Usage(
@@ -149,12 +192,7 @@ class OpenAICompleter(_Recording):
 
     def __call__(self, prompt: Prompt) -> str:
         response = self._client.chat.completions.create(
-            model=self._model,
-            max_tokens=self._max_tokens,
-            messages=[
-                {"role": "system", "content": prompt.cached},
-                {"role": "user", "content": prompt.fresh},
-            ],
+            **openai_kwargs(prompt, model=self._model, max_tokens=self._max_tokens)
         )
         usage = response.usage
         cached = 0

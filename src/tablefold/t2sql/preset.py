@@ -149,6 +149,7 @@ def fold_star_schema(
     field_budget: int = STAR_FIELD_BUDGET,
     prompt_budget: int | None = None,
     max_model_fields: int = STAR_MAX_MODEL_FIELDS,
+    field_bits: dict[tuple[str, str], float] | None = None,
 ) -> FoldResult:
     """팩트와 차원을 모두 앵커로 두고, 아무것도 새로 사지 않는 앵커만 뺀다.
 
@@ -156,6 +157,9 @@ def fold_star_schema(
     이름 기반 추론을 얹으면 없는 엣지가 생겨서 모델이 부푸는 쪽이 더 흔하기
     때문이다. 외래 키가 선언되지 않은 스키마라면 켜거나, 데이터로 검증한 키를
     미리 붙여서 넘긴다(:mod:`tablefold.relate.keys` 참고).
+
+    ``field_bits`` 는 측정된 정보량 비트다. 주면 같은 우선순위 안에서 정보량이
+    큰 필드가 예산 경합을 이긴다. 측정은 호출자의 몫이다.
 
     앵커가 하나도 안 잡히면(관계가 없는 스키마) 기본 탐욕 폴드로 물러선다.
     빈 레이어를 돌려주면 질문이 전부 실패하는데, 그건 스키마 탓이지 설정 탓이
@@ -173,6 +177,7 @@ def fold_star_schema(
             prompt_budget=prompt_budget,
             max_model_fields=max_model_fields,
             infer_missing_keys=infer_missing_keys,
+            field_bits=field_bits,
         )
 
     return fold(
@@ -194,4 +199,5 @@ def fold_star_schema(
         # 웨어하우스 표 이름은 사람이 읽을 말이 아니다. ``D_SA_ORG.HEAD_NM`` 이
         # ``d_sa_org_HEAD_NM`` 이 되면 실제 질의가 쓰는 이름과 어긋난다.
         prefix_joined_fields=False,
+        field_bits=field_bits,
     )
