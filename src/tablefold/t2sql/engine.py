@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import sqlglot
 from sqlglot import exp
@@ -113,6 +113,11 @@ class GenerationResult:
     fell_back: bool = False
     """레이어 전체 프롬프트로 물러섰는지. 참이면 라우팅이 도움이 안 됐다."""
 
+    rerouted_from: str | None = None
+    """재라우팅 전 원래 골랐던 모델. 참이면 라우팅이 틀렸다가 오류로 바로잡힌
+    것이고, ``routed_to`` 는 실제 답을 낸 모델을 가리킨다. 평가 스크립트가 이
+    구분 없이는 "라우팅 적중률"을 과대계한다."""
+
     attempts: tuple[Attempt, ...] = field(default_factory=tuple)
 
     @property
@@ -143,9 +148,7 @@ class GenerationError(RuntimeError):
     def __init__(self, question: str, attempts: tuple[Attempt, ...]) -> None:
         self.question = question
         self.attempts = attempts
-        last = next(
-            (a.error for a in reversed(attempts) if a.error), "시도 없음"
-        )
+        last = next((a.error for a in reversed(attempts) if a.error), "시도 없음")
         super().__init__(f"{len(attempts)}번 호출 후에도 확장되지 않았다: {last}")
 
 
@@ -206,17 +209,16 @@ class TextToSQLEngine:
                 alternative.append(better)
                 return True
 
-            result = self._write(
-                question, attempts, model=chosen, abandon_if=_reroute
-            )
+            result = self._write(question, attempts, model=chosen, abandon_if=_reroute)
             if result is not None:
                 return result
 
             if alternative:
                 result = self._write(
-                    question, attempts, model=alternative[0], routed_to=chosen.name
+                    question, attempts, model=alternative[0]
                 )
                 if result is not None:
+                    result = replace(result, rerouted_from=_name(chosen))
                     return result
 
             if self._layer_cannot_help(attempts):
@@ -338,9 +340,7 @@ class TextToSQLEngine:
             logical, error = self._read(raw)
             usage = self._usage()
             fatal = False
-            LOGGER.info(
-                "   %d회차 프롬프트 %s%s", turn, _size(prompt), _usage(usage)
-            )
+            LOGGER.info("   %d회차 프롬프트 %s%s", turn, _size(prompt), _usage(usage))
 
             if logical is not None and error is None:
                 try:
@@ -357,9 +357,7 @@ class TextToSQLEngine:
                         expansion.joins_emitted,
                         expansion.joins_available,
                     )
-                    attempts.append(
-                        Attempt(stage, prompt, raw, logical, None, usage)
-                    )
+                    attempts.append(Attempt(stage, prompt, raw, logical, None, usage))
                     return GenerationResult(
                         question=question,
                         logical_sql=logical,
@@ -374,9 +372,7 @@ class TextToSQLEngine:
                     )
 
             LOGGER.info("   ✗ 거부  %s", (error or "")[:120])
-            attempts.append(
-                Attempt(stage, prompt, raw, logical, error, usage, fatal)
-            )
+            attempts.append(Attempt(stage, prompt, raw, logical, error, usage, fatal))
             if abandon_if is not None and abandon_if(logical, error):
                 return None
             prompt = build_repair_prompt(

@@ -78,6 +78,12 @@ class TableFidelity:
     in_models: tuple[str, ...]
     """이 테이블을 담은 모델들. 비어 있으면 Tier-2 로 남았다는 뜻."""
 
+    merged_equivalents: tuple[str, ...] = ()
+    """동치 통합으로 대표 컬럼에 접힌 별칭.
+
+    노출된 것으로 세어 보존율에서 감점이 없다 — 대표 값을 물으면 되찾아지기
+    때문이다. 여기 이름을 남기는 이유는 "어디 갔지?"를 한눈에 답하기 위해서다."""
+
     @property
     def answerable_columns(self) -> int:
         """답을 담을 수 있는 컬럼. 잡음은 분모에서 뺀다."""
@@ -123,6 +129,13 @@ class Fidelity:
     ungroupable: tuple[str, ...] = ()
     """모델에 흡수됐지만 ``filter_only`` 로만 나오는 표. 레이어의 진짜 사각지대다."""
 
+    summaries_absorbed: tuple[str, ...] = ()
+    """흡수된 가상 요약 표(파티션 결합 · 월별 요약).
+
+    GROUP BY 분모에서 뺀다 — 이미 합쳐진 것을 또 묻지 않는다는 이유로 잃은
+    셈 치면 요약 옵션이 지표를 나쁘게 만든다. 흡수된 것 자체가 성공이다.
+"""
+
     fanout_guarded: int = 0
     question_hops: int = DEFAULT_QUESTION_HOPS
 
@@ -157,12 +170,17 @@ class Fidelity:
 
     @property
     def table_groupability(self) -> float:
-        """흡수된 표 중 ``GROUP BY`` 에 쓸 수 있는 비율.
+        """흡수된 **일반** 표 중 ``GROUP BY`` 에 쓸 수 있는 비율.
 
-        분모는 전체 표가 아니라 **흡수된** 표다. 아예 안 담긴 표는 커버리지가
-        따로 세므로, 여기서 또 세면 같은 결손을 두 번 벌하게 된다.
+        분모는 전체 표가 아니라 흡수된 일반 표다. 가상 요약 표는 애초에
+        GROUP BY 대상이 아니고, 안 담긴 표는 커버리지가 따로 세므로 여기서
+        또 세면 같은 결손을 두 번 벌게 된다.
         """
-        absorbed = len(self.groupable_tables) + len(self.ungroupable)
+        absorbed = (
+            len(self.groupable_tables)
+            + len(self.ungroupable)
+            + len(self.summaries_absorbed)
+        )
         if not absorbed:
             return 1.0
         return len(self.groupable_tables) / absorbed
@@ -174,11 +192,20 @@ def measure(
     *,
     question_hops: int = DEFAULT_QUESTION_HOPS,
     max_unanswerable: int = 40,
+    merged_aliases: frozenset[tuple[str, str]] | tuple = frozenset(),
 ) -> Fidelity:
-    """레이어가 물리 스키마를 얼마나 대변하는지 잰다."""
+    """레이어가 물리 스키마를 얼마나 대변하는지 잰다.
+
+    ``merged_aliases`` 는 동치 통합(:mod:`tablefold.relate.equivalence`)으로
+    필드에서 빠진 (표, 컬럼) 짝이다. 별칭은 사라진 게 아니라 대표 컬럼으로
+    되찾을 수 있는 것이므로 **노출된 것으로 센다** — 이 목록 없이는 통합 한 번에
+    보존율이 거짓으로 떨어지고, "압축했더니 지표가 나빠졌다"는 거꾸로 된 결론이
+    나온다.
+    """
+    alias_set = frozenset(merged_aliases)
     members = _members_by_model(layer)
     projected = _projected_by_model(layer)
-    exposed = _exposed_columns(layer)
+    exposed = _exposed_columns(layer, alias_set)
     key_columns = _key_columns(graph)
 
     tables: list[TableFidelity] = []
@@ -192,11 +219,14 @@ def measure(
         kept = tuple(c.name for c in table.columns if c.name.lower() in shown)
         lost = tuple(c.name for c in table.columns if c.name.lower() not in shown)
         lost_noise = tuple(c for c in lost if is_noise(c))
-        lost_keys = tuple(
-            c for c in lost if c.lower() in keys and not is_noise(c)
-        )
+        lost_keys = tuple(c for c in lost if c.lower() in keys and not is_noise(c))
         lost_values = tuple(
             c for c in lost if c.lower() not in keys and not is_noise(c)
+        )
+        merged_here = tuple(
+            c.name
+            for c in table.columns
+            if (low, c.name.lower()) in alias_set and c.name.lower() in shown
         )
 
         tables.append(
@@ -210,6 +240,7 @@ def measure(
                 in_models=tuple(
                     name for name, group in projected.items() if low in group
                 ),
+                merged_equivalents=merged_here,
             )
         )
         total += len(table.columns)
@@ -228,6 +259,14 @@ def measure(
     in_models = set().union(*projected.values()) if projected else set()
     groupable = _groupable_tables(layer) & in_models
 
+    # 가상 표(파티션 결합 · 월별 요약)는 태어날 때부터 미리 합쳐진 물건이다.
+    # GROUP BY 충을 못 넣었다고 잃은 게 아니다 — 자체가 요약 입도다. 그래서
+    # ungroupable 분모에서 빼고, 대신 "흡수된 요약" 수로 따로 보고한다.
+    virtual_names = {t.name.lower() for t in graph.schema.tables if t.is_virtual}
+    ungroupable_all = in_models - groupable
+    summaries_absorbed = sorted(ungroupable_all & virtual_names)
+    ungroupable = sorted(ungroupable_all - virtual_names)
+
     return Fidelity(
         tables=tuple(tables),
         total_columns=total,
@@ -242,7 +281,8 @@ def measure(
         unanswerable=tuple(tuple(sorted(p)) for p in missed[:max_unanswerable]),  # type: ignore[misc]
         unanswerable_total=len(missed),
         groupable_tables=tuple(sorted(groupable)),
-        ungroupable=tuple(sorted(in_models - groupable)),
+        ungroupable=tuple(ungroupable),
+        summaries_absorbed=tuple(summaries_absorbed),
         fanout_guarded=_fanout_guarded(layer),
         question_hops=question_hops,
     )
@@ -285,16 +325,23 @@ def _projected_by_model(layer: LogicalLayer) -> dict[str, frozenset[str]]:
     }
 
 
-def _exposed_columns(layer: LogicalLayer) -> dict[str, frozenset[str]]:
+def _exposed_columns(
+    layer: LogicalLayer,
+    merged_aliases: frozenset[tuple[str, str]] = frozenset(),
+) -> dict[str, frozenset[str]]:
     """물리 ``table -> {column}``. 필터 전용 필드도 꺼낼 수 있는 것으로 센다.
 
     값으로 SELECT 하지는 못해도 조건은 걸 수 있으므로, 질문에 답하는 능력의
-    관점에서는 살아 있는 컬럼이다.
+    관점에서는 살아 있는 컬럼이다. 동치 별칭도 살아 있다 — 대표 컬럼 값을
+    물면 그 값이 곧 별칭의 값이다.
     """
     found: dict[str, set[str]] = {}
     for model in layer.models:
         for f in model.fields:
             found.setdefault(f.source.table.lower(), set()).add(f.source.column.lower())
+    if merged_aliases:
+        for table, column in merged_aliases:
+            found.setdefault(table, set()).add(column)
     return {k: frozenset(v) for k, v in found.items()}
 
 
@@ -410,6 +457,7 @@ def to_dict(fidelity: Fidelity) -> dict:
         "table_groupability": round(fidelity.table_groupability, 4),
         "groupable_tables": list(fidelity.groupable_tables),
         "ungroupable": list(fidelity.ungroupable),
+        "summaries_absorbed": list(fidelity.summaries_absorbed),
         "counts": {
             "total_columns": fidelity.total_columns,
             "exposed_columns": fidelity.exposed_columns,
@@ -435,6 +483,7 @@ def to_dict(fidelity: Fidelity) -> dict:
                 "dropped_keys": list(t.dropped_keys),
                 "dropped_values": list(t.dropped_values),
                 "dropped_noise": list(t.dropped_noise),
+                "merged_equivalents": list(t.merged_equivalents),
                 "in_models": list(t.in_models),
             }
             for t in fidelity.tables
@@ -458,6 +507,7 @@ def render_report(fidelity: Fidelity) -> str:
         f"({len(c.groupable_tables)}/"
         f"{len(c.groupable_tables) + len(c.ungroupable)} 표를 GROUP BY 할 수 있음)",
         f"팬아웃 방어 {c.fanout_guarded:5d}   개의 1:N 자식이 집계로 접힘",
+        f"요약 흡수   {len(c.summaries_absorbed):5d}   개의 가상 요약이 모델에 들어감",
     ]
     if c.ungroupable:
         lines.append("")

@@ -9,15 +9,15 @@
 <body>
 
 <header class="topbar">
-  <div class="wrap topbar-inner" style="display: flex; justify-content: space-between; align-items: center;">
+  <div class="wrap topbar-inner">
     <div>
       <div class="wordmark">tablefold</div>
       <p class="tagline">테이블이 많아 AI가 헤매는 데이터베이스를, 몇 개의 넓은 표로 묶어 줍니다.</p>
     </div>
-    <div style="display: flex; gap: 1rem;">
-      <a href="/" style="color: #6366f1; text-decoration: none; font-weight: bold; font-size: 0.95rem;">📊 대시보드</a>
-      <a href="/chat" style="color: #b4befe; text-decoration: none; font-weight: bold; font-size: 0.95rem;">💬 Text-to-SQL 챗봇</a>
-    </div>
+    <nav class="nav-links">
+      <a href="/" class="active">📊 대시보드</a>
+      <a href="/chat">💬 Text-to-SQL 챗봇</a>
+    </nav>
   </div>
 </header>
 
@@ -137,6 +137,16 @@
       <div id="lineageDetail" class="lineage-detail"></div>
     </div>
 
+    <!-- 컬럼 압축 지도: 물리 컬럼이 논리 필드로 접힌 비율과, 모델별 유입 통로. -->
+    <div class="card" id="compressionPanel" hidden>
+      <h2>얼마나 압축됐나</h2>
+      <p class="step-sub">
+        원래 스키마의 컬럼이 몇 개의 항목으로 접혔는지입니다.
+        1개가 1개가 아니면 여러 표가 한 줄에 눌려 들어간 것입니다.
+      </p>
+      <div id="compressionStrip" class="comp-strip"></div>
+    </div>
+
     <div class="card" id="fidelityPanel"></div>
   </section>
 
@@ -238,6 +248,12 @@
               <small>설명 전체가 쓸 수 있는 글자 수. AI가 한 번에 읽는 양이고, 이것이 진짜 한계입니다. 비우면 항목 수로 대신 잽니다.</small>
             </label>
 
+            <label class="knob knob-check">
+              <span class="knob-name">월별 요약 모델 만들기</span>
+              <input type="checkbox" id="monthlySummaries">
+              <small>팩트마다 월 입도 요약을 세웁니다. "월별 추세" 질문이 원본 100만 행 대신 요약 몇십 행을 읽습니다 — 이 화면에서 몇 안 되는 진짜 행 압축입니다. 모델 수가 늘어납니다.</small>
+            </label>
+
             <label class="knob greedy-only">
               <span class="knob-name">새 모델의 최소 이득</span>
               <input type="number" id="minGain" min="1" max="10" value="1">
@@ -271,21 +287,21 @@
 
           <div class="adv-actions">
             <button type="button" id="loadSample" class="btn btn-ghost">예제 다시 불러오기</button>
-            <button type="button" id="runAutoTune" class="btn btn-secondary" style="background: linear-gradient(135deg, #a6e3a1, #26a65b); color: #11111b; font-weight: 700; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer;">⚡ 최적 파라미터 자동 탐색 (Auto-Tune)</button>
+            <button type="button" id="runAutoTune" class="btn btn-autotune">⚡ 최적 파라미터 자동 탐색 (Auto-Tune)</button>
             <button type="button" id="runCurve" class="btn btn-secondary" hidden>📈 예산 대비 답변 곡선</button>
             <button type="button" id="runFold" class="btn btn-primary">다시 묶기</button>
           </div>
 
 
-          <div id="autotuneProgress" style="margin-top: 15px; background: #11111b; border: 1px solid #313244; padding: 12px 16px; border-radius: 8px;" hidden>
-            <div style="display: flex; justify-content: space-between; font-size: 0.85rem; color: #a6adc8; margin-bottom: 6px;">
+          <div id="autotuneProgress" class="autotune-progress" hidden>
+            <div class="autotune-head">
               <span id="autotuneStatusText">📊 AI 파라미터 최적화 탐색 중... [0 / 24 (0%)]</span>
-              <span id="autotuneScoreText" style="color: #a6e3a1; font-weight: 600;">최고 점수: -</span>
+              <span id="autotuneScoreText" class="autotune-score">최고 점수: -</span>
             </div>
-            <div style="background: #181825; border-radius: 6px; height: 10px; overflow: hidden; border: 1px solid #313244;">
-              <div id="autotuneProgressBar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #89b4fa, #a6e3a1); transition: width 0.2s ease;"></div>
+            <div class="autotune-track">
+              <div id="autotuneProgressBar" class="autotune-bar"></div>
             </div>
-            <div id="autotuneDetailText" style="font-size: 0.78rem; color: #6c7086; margin-top: 6px;">탐색 준비 중...</div>
+            <div id="autotuneDetailText" class="autotune-detail">탐색 준비 중...</div>
           </div>
 
           <div id="curveBlock" class="curve-block" hidden>
@@ -359,6 +375,7 @@
       </div>
       <button id="sheetClose" class="icon-btn" aria-label="닫기">&times;</button>
     </div>
+    <div id="sheetFlow" class="sheet-flow"></div>
     <div class="sheet-body" id="sheetBody"></div>
   </div>
 </div>

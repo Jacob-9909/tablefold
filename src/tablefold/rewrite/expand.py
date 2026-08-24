@@ -52,17 +52,86 @@ _CHILD_ALIAS = "src"
 # 없는 것을 발견하면 여기 추가하면 된다. (``plan`` 은 T-SQL 에서 실제로 부딪혔다.)
 _NEEDS_QUOTING = frozenset(
     {
-        "all", "and", "any", "as", "asc", "between", "by", "case", "cast", "check",
-        "column", "constraint", "create", "cross", "current", "current_date",
-        "current_time", "current_timestamp", "current_user", "default", "desc",
-        "distinct", "do", "else", "end", "except", "exists", "false", "for",
-        "foreign", "from", "full", "grant", "group", "having", "in", "index",
-        "inner", "insert", "intersect", "into", "is", "join", "key", "left",
-        "like", "limit", "natural", "not", "null", "offset", "on", "only", "or",
-        "order", "outer", "plan", "primary", "references", "returning", "right",
-        "rows", "select", "session_user", "set", "some", "table", "then", "to",
-        "true", "union", "unique", "update", "user", "using", "values", "when",
-        "where", "window", "with",
+        "all",
+        "and",
+        "any",
+        "as",
+        "asc",
+        "between",
+        "by",
+        "case",
+        "cast",
+        "check",
+        "column",
+        "constraint",
+        "create",
+        "cross",
+        "current",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "current_user",
+        "default",
+        "desc",
+        "distinct",
+        "do",
+        "else",
+        "end",
+        "except",
+        "exists",
+        "false",
+        "for",
+        "foreign",
+        "from",
+        "full",
+        "grant",
+        "group",
+        "having",
+        "in",
+        "index",
+        "inner",
+        "insert",
+        "intersect",
+        "into",
+        "is",
+        "join",
+        "key",
+        "left",
+        "like",
+        "limit",
+        "natural",
+        "not",
+        "null",
+        "offset",
+        "on",
+        "only",
+        "or",
+        "order",
+        "outer",
+        "plan",
+        "primary",
+        "references",
+        "returning",
+        "right",
+        "rows",
+        "select",
+        "session_user",
+        "set",
+        "some",
+        "table",
+        "then",
+        "to",
+        "true",
+        "union",
+        "unique",
+        "update",
+        "user",
+        "using",
+        "values",
+        "when",
+        "where",
+        "window",
+        "with",
     }
 )
 
@@ -74,6 +143,7 @@ def _ident(name: str) -> exp.Identifier:
     구성상 안전하고, 인용하면 결과 SQL 만 읽기 나빠진다.
     """
     return exp.to_identifier(name, quoted=name.lower() in _NEEDS_QUOTING)
+
 
 # CTEs are named with this prefix rather than the model's own name. A model is
 # usually named after its anchor table, and a CTE named `orders` whose body
@@ -179,9 +249,7 @@ def expand(
 
     for model in referenced:
         fields = fields_by_model[model.name]
-        select, join_count = _build_model_select(
-            model, graph, fields, pushed=pushed
-        )
+        select, join_count = _build_model_select(model, graph, fields, pushed=pushed)
         ctes.append((model.name, select))
         used_fields.extend(f"{model.name}.{f.name}" for f in fields)
         emitted += join_count
@@ -370,10 +438,20 @@ def _required_fields(
 
 
 def _split_conjuncts(where: exp.Expression | None) -> list[exp.Expression]:
-    """WHERE 절을 AND 로 끊는다. OR 아래는 쪼개지 않는다."""
+    """WHERE 절을 AND 로 끊는다. OR 아래는 쪼개지 않는다.
+
+    괄호는 뚫고 들어간다. LLM 은 ``WHERE (기간 조건 AND 다른 조건)`` 처럼
+    무해한 괄호를 습관처럼 붙인다. 괄호 하나가 조각을 불투명하게 만들면
+    pushdown 이 실패하고, 실패는 ``FilterOnlyMisuse`` 로 돌아와 유료 수리
+    라운드를 태운다. 맨 위가 AND 로만 이뤄진 한 괄호 풀기는 뜻을 바꾸지
+    않는다 — OR 아래는 여전히 쪼개지 않으므로 ``(a OR b) AND c`` 의 안쪽은
+    그대로 한 덩어리로 남는다.
+    """
     if where is None:
         return []
     node = where.this if isinstance(where, exp.Where) else where
+    if isinstance(node, exp.Paren):
+        return _split_conjuncts(node.this)
     if isinstance(node, exp.And):
         return _split_conjuncts(node.this) + _split_conjuncts(node.expression)
     return [node]
@@ -464,9 +542,7 @@ def _pushdown(
                 (model.name.lower(), _child_key(field.source.path[0])), []
             ).append((moved, field))
 
-        select.set(
-            "where", exp.Where(this=_conjunction(keep)) if keep else None
-        )
+        select.set("where", exp.Where(this=_conjunction(keep)) if keep else None)
 
     return rewritten, pushed
 
@@ -664,7 +740,10 @@ def _build_model_select(
         # 두 키로 접은 두 집계가 서로의 조건을 받는다 — :func:`_pushdown` 참고.
         predicates = (pushed or {}).get((model.name.lower(), key), [])
         subquery = _aggregate_subquery(
-            step.to_table, step, child_fields.get(key, []), graph,
+            step.to_table,
+            step,
+            child_fields.get(key, []),
+            graph,
             predicates=predicates,
         )
         alias = _aggregate_alias(key)
@@ -741,13 +820,9 @@ def bind_condition(step: JoinStep, left: str, right: str) -> exp.Expression:
         ) from exc
 
 
-def _many_to_one_join(
-    path: tuple[JoinStep, ...], graph: SchemaGraph
-) -> exp.Expression:
+def _many_to_one_join(path: tuple[JoinStep, ...], graph: SchemaGraph) -> exp.Expression:
     step = path[-1]
-    return exp.alias_(
-        _physical(step.to_table, graph), _path_alias(path), table=True
-    )
+    return exp.alias_(_physical(step.to_table, graph), _path_alias(path), table=True)
 
 
 def _join_condition(path: tuple[JoinStep, ...]) -> exp.Expression:
@@ -841,6 +916,7 @@ def _aggregate_subquery(
 
     needs_dim = any(len(f.source.path) > 1 for _, f in (predicates or []))
     src = _CHILD_ALIAS if needs_dim else None
+
     def col(name: str) -> exp.Column:
         return _column(src, name) if src else exp.Column(this=_ident(name))
 

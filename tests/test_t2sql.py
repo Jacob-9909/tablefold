@@ -309,9 +309,9 @@ def test_a_rejected_answer_is_repaired_with_the_expansion_error(star_fold):
             return "```sql\nSELECT NOPE FROM D_ORG\n```"
         return "```sql\nSELECT HEAD_NM FROM D_ORG\n```"
 
-    result = TextToSQLEngine(
-        star_fold, completer=completer, route=False
-    ).generate("조직")
+    result = TextToSQLEngine(star_fold, completer=completer, route=False).generate(
+        "조직"
+    )
 
     assert result.repairs == 1
     assert len(result.attempts) == 2
@@ -339,9 +339,7 @@ def test_exhausted_attempts_raise_rather_than_return_unusable_sql(star_fold):
 
 def test_a_reply_with_no_sql_is_repaired_too(star_fold):
     """SQL을 못 꺼낸 것도 고칠 수 있는 실패다. 완성 텍스트를 그대로 돌려준다."""
-    replies = iter(
-        ["답할 수 없습니다.", "```sql\nSELECT HEAD_NM FROM D_ORG\n```"]
-    )
+    replies = iter(["답할 수 없습니다.", "```sql\nSELECT HEAD_NM FROM D_ORG\n```"])
 
     result = TextToSQLEngine(
         star_fold, completer=lambda _: next(replies), route=False
@@ -412,9 +410,7 @@ def test_routing_is_skipped_when_the_layer_has_one_model(star_fold):
 
     only_sales = replace(
         star_fold,
-        layer=replace(
-            star_fold.layer, models=(star_fold.layer.model("F_SALES"),)
-        ),
+        layer=replace(star_fold.layer, models=(star_fold.layer.model("F_SALES"),)),
     )
     calls: list = []
 
@@ -499,9 +495,7 @@ def test_the_schema_gap_names_columns_the_gold_sql_needs(star):
 @pytest.mark.skipif(not FIXTURE.exists(), reason="픽스처 없음")
 def test_the_enterprise_fixture_folds_into_an_answerable_layer():
     """골드셋 스키마 19표가 팩트/차원 양쪽 앵커를 모두 갖춰야 한다."""
-    schema = recover_relationships(
-        DDLIntrospector.from_path(FIXTURE).introspect()
-    )
+    schema = recover_relationships(DDLIntrospector.from_path(FIXTURE).introspect())
     result = fold_star_schema(schema)
     names = {m.name for m in result.layer.models}
 
@@ -517,9 +511,7 @@ def test_the_shipped_examples_expand_against_the_fixture():
     """예시가 깨지면 프롬프트에서 조용히 사라진다. 여기서 시끄럽게 깨져야 한다."""
     from tablefold.t2sql import NL2SQL_EXAMPLES
 
-    schema = recover_relationships(
-        DDLIntrospector.from_path(FIXTURE).introspect()
-    )
+    schema = recover_relationships(DDLIntrospector.from_path(FIXTURE).introspect())
     result = fold_star_schema(schema)
 
     kept = valid_examples(NL2SQL_EXAMPLES, result.layer, result.graph)

@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -20,7 +21,9 @@ from tablefold.fold import fold
 from tablefold.read.ddl import DDLIntrospector
 from tablefold.relate.graph import SchemaGraph, infer_foreign_keys
 from tablefold.relate.synthesize import add_period_anchor
+from tablefold.report import compression as comp
 from tablefold.report import fidelity as fid
+from tablefold.report import information as info
 from tablefold.report import lineage as lin
 from tablefold.report import prompt as emit
 from tablefold.rewrite.expand import ExpansionError, expand
@@ -38,9 +41,21 @@ FIXTURES_DIR = BASE_DIR / "fixtures"
 
 app = FastAPI(title="Tablefold 2-Tier Schema Engineering Dashboard")
 
+# 이 API 는 라이브 소스일 때 실제 데이터베이스 조회와 LLM 지출을 일으킨다.
+# 와일드카드 + credentials 조합은 아무 웹페이지나 방문자의 브라우저를 통해
+# 질의를 날릴 수 있게 한다 — 허용 출처를 명시한다. 환경 변수로 늘린다.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "TABLEFOLD_ALLOWED_ORIGINS",
+        "http://localhost:8000,http://127.0.0.1:8000",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,6 +79,9 @@ class FoldRequest(BaseModel):
     """
 
     max_areas: int | None = 6
+
+    monthly_summaries: bool = False
+    """팩트마다 월 입도 요약 가상 테이블을 세운다. 행이 진짜 줄어드는 압축."""
 
 
 class ExpandRequest(BaseModel):
@@ -93,6 +111,8 @@ class ChatRequest(BaseModel):
     ddl: str = ""
     source: str = "live"
     dialect: str = ""
+    monthly_summaries: bool = False
+    """팩트마다 월 입도 요약 모델을 세워 추세 질문이 요약을 읽게 한다."""
     """비워 두면 소스가 정한다 — 라이브는 MSSQL 이므로 ``tsql``.
 
     기본값이 ``postgres`` 이던 동안 화면은 ``LIMIT`` 을 만들어 MSSQL 에 던졌고
@@ -162,7 +182,11 @@ def _load_source(req: FoldRequest | ExpandRequest):
         except live.LiveUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-        anchors = ("member_info", "bank_receipt_product_info", "public_fund_product_info")
+        anchors = (
+            "member_info",
+            "bank_receipt_product_info",
+            "public_fund_product_info",
+        )
         options = {
             "selector": ExplicitSelector(anchors, prune_redundant=True),
             "infer_missing_keys": True,
@@ -186,7 +210,6 @@ def _load_source(req: FoldRequest | ExpandRequest):
 
         facts = tuple(meta["facts"])
         dims = tuple(meta["dimensions"])
-
 
         # 앵커를 무엇으로 잡느냐가 곧 무엇을 물을 수 있느냐다. 실측(NL2SQL 19테이블):
         #
@@ -274,6 +297,52 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
                 fk for fk in raw_schema.foreign_keys if not fk.inferred
             )
             enriched_schema = raw_schema
+
+        # 2-1. 월별 요약 — 행이 진짜 줄어드는 압축. 요약은 무조건 **독립
+        #      앵커**로 살려 둔다. 흡수해 버리면 월 입도가 filter_only 로만
+        #      남아 "월별 추세"를 GROUP BY 할 수단이 사라진다. greedy 가 고른
+        #      앵커는 시험 접기로 알아낸 뒤 요약을 나란히 붙여 최종 폴드한다.
+        if req.monthly_summaries:
+            from tablefold.relate.synthesize import add_monthly_summaries
+
+            widened, built = add_monthly_summaries(enriched_schema)
+            if built:
+                existing_selector = fold_options.get("selector")
+                if existing_selector is not None:
+                    anchors = (*existing_selector.anchors, *built)
+                    fold_options["selector"] = ExplicitSelector(
+                        anchors, prune_redundant=True
+                    )
+                    fold_options["max_areas"] = len(anchors)
+                    enriched_schema = widened
+                else:
+                    trial_policy = SelectionPolicy(
+                        coverage_target=req.coverage,
+                        min_gain=req.min_gain,
+                        max_fields_per_table=req.max_cost,
+                        max_areas=fold_options.pop("max_areas", req.max_areas),
+                    )
+                    trial = fold(
+                        widened,
+                        policy=trial_policy,
+                        field_budget=fold_options.get("field_budget", req.field_budget),
+                        prompt_budget=req.prompt_budget,
+                        max_model_fields=fold_options.get(
+                            "max_model_fields", MAX_MODEL_FIELDS
+                        ),
+                        max_hops=fold_options.get("max_hops", 3),
+                        include_aggregates=fold_options.get("include_aggregates", True),
+                        expose_child_filters=fold_options.get(
+                            "expose_child_filters", False
+                        ),
+                        infer_missing_keys=False,
+                    )
+                    greedy_anchors = tuple(m.base_table for m in trial.layer.models)
+                    fold_options["selector"] = ExplicitSelector(
+                        (*greedy_anchors, *built), prune_redundant=False
+                    )
+                    fold_options["max_areas"] = len(greedy_anchors) + len(built)
+                    enriched_schema = widened
 
         # 2. 그래프 구축 및 프로파일링 (Fact Score)
         graph = SchemaGraph.build(enriched_schema)
@@ -375,7 +444,9 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
                     "role": p.role.value if p else "dimension",
                     "in_degree": p.in_degree if p else 0,
                     "out_degree": p.out_degree if p else 0,
-                    "tier": "Tier-1 (Core)" if t.name.lower() in covered_table_names else "Tier-2 (Edge)",
+                    "tier": "Tier-1 (Core)"
+                    if t.name.lower() in covered_table_names
+                    else "Tier-2 (Edge)",
                 }
             )
 
@@ -414,12 +485,14 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
         for t in tier2_tables_detailed:
             col_list_str = ", ".join(f"{c['name']} {c['type']}" for c in t["columns"])
             edge_prompt_lines.append(f"TABLE {t['name']} ({col_list_str})")
-        
+
         full_2tier_prompt_text = core_prompt_text + "\n".join(edge_prompt_lines)
 
         # 10. 반영도 — 얼마나 줄었나(위의 size)와 짝을 이루는 "무엇을 잃었나".
         #     둘 중 하나만 보이면 테이블을 버려서 좋아지는 지표가 된다.
-        measured = fid.measure(result.layer, result.graph)
+        measured = fid.measure(
+            result.layer, result.graph, merged_aliases=result.merged_aliases
+        )
 
         # 11. 계보 — 화면이 ERD 처럼 그릴 수 있게 노드/엣지로 뒤집은 같은 사실.
         lineage_graph = lin.to_graph(
@@ -448,6 +521,11 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
         return {
             "fidelity": fid.to_dict(measured),
             "fidelity_report": fid.render_report(measured),
+            # 컬럼이 어디서 와서 어떻게 접혔는지 — 모델 상세의 흐름도가 읽는다.
+            "compression": comp.measure(result.layer),
+            # 커서가 없는 오프라인 소스도 복제율은 계산된다. 비트 보존율은
+            # measured 플래그가 거짓일 뿐, 화면은 그에 맞춰 문구를 고른다.
+            "information": info.measure(result.layer, result.schema),
             "lineage": lineage_graph,
             "tier_summary": {
                 "tier1_core_models_count": len(result.layer.models),
@@ -477,7 +555,11 @@ def run_fold(req: FoldRequest) -> dict[str, Any]:
                 "candidates_count": len(lattice.candidates),
                 "candidates": candidates_detailed,
             },
-            "source": {"kind": req.source, "anchor_mode": req.anchor_mode, **source_meta},
+            "source": {
+                "kind": req.source,
+                "anchor_mode": req.anchor_mode,
+                **source_meta,
+            },
             "logical": layer_dict,
             "prompt_text": full_2tier_prompt_text,
             "core_prompt_text": core_prompt_text,
@@ -540,12 +622,39 @@ def run_expand(req: ExpandRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/chat-capability")
+def chat_capability() -> dict[str, bool]:
+    """챗봇이 실제로 답할 수 있는지.
+
+    키가 없으면 챗봇은 첫 질문에서 400 으로 끝난다. 눌러 봐야 실패하는 입력창을
+    주는 것보다, 화면이 미리 알게 해서 안내를 보여 주고 입력을 막는 편이 낫다.
+    호출이 아니라 생성자만 지어 보므로 네트워크를 쓰지 않는다.
+    """
+    from tablefold.t2sql.provider import ProviderUnavailable, default_completer
+
+    try:
+        default_completer()
+    except ProviderUnavailable:
+        return {"llm_available": False}
+    return {"llm_available": True}
+
+
+def _resolve_chat_dialect(source: str, requested: str) -> str:
+    """챗봇 SQL 을 실제로 뽑아 낼 방언.
+
+    라이브 소스는 접속 대상이 MSSQL 이라 :func:`dialect_for_live` 가 정한다.
+    예제(DDL) 소스는 데이터베이스가 없으므로 PostgreSQL 이 기본이다 — 치환을
+    그대로 적용했던 동안 화면은 "PostgreSQL 문법으로 답합니다"라고 안내하는데
+    T-SQL 이 나왔다. 안내와 결과가 어긋나면 안내가 거짓말이 된다.
+    """
+    if source in ("live", "financial"):
+        return dialect_for_live(requested)
+    return requested or "postgres"
+
+
 class AutoTuneRequest(BaseModel):
     source: str = "ddl"
     ddl: str = ""
-
-
-from fastapi.responses import StreamingResponse
 
 
 GOLDSET_GLOB = "*.xlsx"
@@ -640,6 +749,7 @@ def run_autotune(req: AutoTuneRequest):
 
         def event_generator():
             import json
+
             for item in autotune_stream(schema):
                 # ``_`` 로 시작하는 키는 파이썬 호출자용이다(``AutoTuneResult``
                 # 객체). JSON 으로 나가면 안 된다.
@@ -652,10 +762,7 @@ def run_autotune(req: AutoTuneRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-
-
 @app.post("/api/chat")
-
 def run_chat(req: ChatRequest) -> dict[str, Any]:
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question is required.")
@@ -679,7 +786,6 @@ def run_chat(req: ChatRequest) -> dict[str, Any]:
             default_completer,
             prepare_for_questions,
         )
-        from tablefold.t2sql.prepare import dialect_for_live
 
         prep = prepare_for_questions(
             schema,
@@ -687,6 +793,9 @@ def run_chat(req: ChatRequest) -> dict[str, Any]:
             # 화면이 문자 예산을 정했으면 챗봇도 **같은 레이어**를 봐야 한다.
             # 여기만 기본값으로 두면 화면에 그려진 필드를 챗봇이 모른다.
             prompt_budget=req.prompt_budget,
+            # 추세 질문은 요약 모델이 읽는다 — 라우터 카탈로그에 우선 힌트가
+            # 붙는다(:func:`tablefold.t2sql.prompt.render_catalog`).
+            monthly_summaries=req.monthly_summaries,
         )
 
         engine = TextToSQLEngine(
@@ -695,7 +804,7 @@ def run_chat(req: ChatRequest) -> dict[str, Any]:
             examples=NL2SQL_EXAMPLES,
             # 만든 SQL 을 그대로 이 데이터베이스에 실행한다. 생성 방언과 실행
             # 대상이 어긋나면 문법 오류로 죽는다.
-            dialect=dialect_for_live(req.dialect),
+            dialect=_resolve_chat_dialect(req.source, req.dialect),
         )
 
         gen_res = engine.generate(req.question)
@@ -714,16 +823,13 @@ def run_chat(req: ChatRequest) -> dict[str, Any]:
             "attempts_count": len(gen_res.attempts),
             "preparation_note": prep.note,
             "routed_to": gen_res.routed_to,
+            "rerouted_from": gen_res.rerouted_from,
             "source_kind": req.source,
             "execution_result": exec_res,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-
-
-
-from fastapi.responses import FileResponse
 
 static_path = Path(__file__).parent / "static"
 
@@ -738,4 +844,3 @@ def get_chat_page():
 
 if static_path.exists():
     app.mount("/", StaticFiles(directory=static_path, html=True), name="static")
-

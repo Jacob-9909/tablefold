@@ -367,9 +367,7 @@ def test_a_dimension_anchor_does_not_filter_on_itself():
 
     # 자식을 거쳐 앵커 자신으로 되돌아온 필터 필드가 있으면 안 된다.
     loops = [
-        f
-        for f in model.fields
-        if f.filter_only and f.source.table.lower() == "d_org"
+        f for f in model.fields if f.filter_only and f.source.table.lower() == "d_org"
     ]
     assert loops == []
     # 자식 자신의 컬럼으로 거는 통로는 남아 있어야 한다.

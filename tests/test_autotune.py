@@ -95,7 +95,8 @@ def test_stream_events_are_json_serialisable(retail_schema):
 def test_autotune_matches_its_own_stream(retail_schema):
     """두 벌로 두었을 때 한쪽만 고쳐져서 화면과 CLI 의 추천이 갈라졌다."""
     streamed = [
-        e for e in autotune_stream(retail_schema, max_candidates=5)
+        e
+        for e in autotune_stream(retail_schema, max_candidates=5)
         if e["event"] == "done"
     ][0]["result"]
     direct = autotune(retail_schema, max_candidates=5)

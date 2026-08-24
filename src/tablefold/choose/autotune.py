@@ -179,8 +179,7 @@ def _grid() -> tuple[_Candidate, ...]:
     return tuple(
         _Candidate(
             label=(
-                f"coverage={cov}, budget={budget}, "
-                f"min_gain={gain}, max_cost={cost}"
+                f"coverage={cov}, budget={budget}, min_gain={gain}, max_cost={cost}"
             ),
             anchor_mode="auto",
             coverage=cov,

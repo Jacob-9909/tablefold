@@ -95,8 +95,7 @@ GROUP_LABELS = (
     "Aggregated from child rows — 자식 행에 대해 이미 합산된 총계. "
     "여러 행을 묶으려면 SUM 을 다시 써도 된다(이중 계산 아님). "
     "AVG 는 총계들의 평균이 되어 뜻이 달라진다",
-    "WHERE 전용 — 위 집계에 조건을 걸 때만 쓴다. "
-    "SELECT 나 GROUP BY 에 쓸 수 없다",
+    "WHERE 전용 — 위 집계에 조건을 걸 때만 쓴다. SELECT 나 GROUP BY 에 쓸 수 없다",
 )
 """필드 묶음의 제목. :func:`render_model` 과 :func:`model_overhead` 가 함께 읽는다.
 
@@ -206,8 +205,7 @@ def _header(model_count: int, covered: int, total: int) -> str:
 
 
 _INTRO = (
-    "각 모델은 넓은 표 하나다. 한 번에 한 모델만 조회하고, "
-    "모델끼리 JOIN 하지 않는다."
+    "각 모델은 넓은 표 하나다. 한 번에 한 모델만 조회하고, 모델끼리 JOIN 하지 않는다."
 )
 _TIER2_HEADER = "=== TIER-2 EDGE TABLES (On-Demand / Specific Query Fallback) ==="
 
@@ -231,9 +229,7 @@ def render_text(layer: LogicalLayer) -> str:
       그대로 돌아온다.
     """
     lines: list[str] = [
-        _header(
-            len(layer.models), layer.covered_table_count, layer.source_table_count
-        ),
+        _header(len(layer.models), layer.covered_table_count, layer.source_table_count),
         _INTRO,
         "",
     ]
@@ -340,9 +336,7 @@ def _endpoint(text: str) -> tuple[str, tuple[str, ...]]:
     found = _ENDPOINT.match(text)
     if found is None:
         raise ValueError(f"malformed join endpoint: {text!r}")
-    columns = tuple(
-        c.strip() for c in found.group("columns").split(",") if c.strip()
-    )
+    columns = tuple(c.strip() for c in found.group("columns").split(",") if c.strip())
     return found.group("table"), columns
 
 
@@ -376,9 +370,7 @@ def _model_from_dict(data: dict[str, Any]) -> LogicalModel:
                     table=f["source"]["table"],
                     column=f["source"]["column"],
                     aggregate=f["source"].get("aggregate"),
-                    path=tuple(
-                        _step_from_dict(s) for s in f["source"].get("path", ())
-                    ),
+                    path=tuple(_step_from_dict(s) for s in f["source"].get("path", ())),
                 ),
                 description=f.get("description"),
                 filter_only=bool(f.get("filter_only", False)),

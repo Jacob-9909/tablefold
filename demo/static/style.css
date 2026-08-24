@@ -76,6 +76,30 @@ body {
   font-size: 14px;
 }
 
+/* 두 화면이 같은 머리글을 쓴다. 링크 색은 본문과 같고, 지금 있는 화면만
+   강조색에 밑줄 — 어디에 있는지가 위치로 알려져야 한다. */
+.nav-links {
+  display: flex;
+  gap: 18px;
+  align-items: baseline;
+  margin-left: auto;
+}
+
+.nav-links a {
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.nav-links a:hover { color: var(--accent); }
+
+.nav-links a.active {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 6px;
+}
+
 /* ── 단계 ───────────────────────────────────────────────────────────────── */
 
 .step { margin: 46px 0; }
@@ -1049,9 +1073,166 @@ table.data code {
 .curve-block { margin-top: 15px; }
 .curve-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
 .curve-table th,
-.curve-table td { padding: 6px 8px; text-align: right; border-bottom: 1px solid #313244; }
-.curve-table th { color: #a6adc8; font-weight: 600; }
-.curve-table tr.is-knee td { color: #a6e3a1; font-weight: 700; }
+.curve-table td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--line); }
+.curve-table th { color: var(--muted); font-weight: 600; }
+.curve-table tr.is-knee td { color: var(--good); font-weight: 700; }
 .curve-table td.curve-apply { text-align: left; }
-.curve-apply button { background: none; border: 1px solid #45475a; color: inherit;
+.curve-apply button { background: none; border: 1px solid var(--line); color: inherit;
   border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: .78rem; }
+.curve-apply button:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── 자동 탐색 ────────────────────────────────────────────────────────────
+ * 진행 표시와 버튼. 인라인 스타일이던 때는 어두운 팔레트 값이 밝은 화면 위에
+ * 얹혀 읽기 어려웠다 — 색은 변수로만 쓴다.
+ */
+
+.btn-autotune {
+  background: var(--good);
+  color: #fff;
+}
+
+.btn-autotune:hover { opacity: 0.9; }
+
+.autotune-progress {
+  margin-top: 15px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 12px 16px;
+  border-radius: 8px;
+}
+
+.autotune-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.autotune-score { color: var(--good); font-weight: 600; white-space: nowrap; }
+
+.autotune-track {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.autotune-bar {
+  width: 0%;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.autotune-detail {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+/* ── 컬럼 압축 지도 ───────────────────────────────────────────────────────
+ * 물리 컬럼이 논리 항목으로 접힌 비율(스트립)과, 모델 상세의 유입 리본(흐름).
+ * 색은 필드 종류 네 가지를 그대로 쓴다 — 화면의 한 가지 의미는 한 가지 색.
+ */
+
+.comp-strip { display: grid; gap: 14px; }
+
+.comp-ratio { display: flex; align-items: baseline; gap: 10px; }
+
+.comp-num {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.comp-num-after { color: var(--accent); }
+
+.comp-arrow { color: var(--muted); font-size: 20px; }
+
+.comp-label { color: var(--muted); font-size: 13px; }
+
+.comp-models { display: grid; gap: 6px; }
+
+.comp-row {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) 1fr minmax(110px, auto);
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.comp-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.comp-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.comp-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.comp-val { color: var(--muted); text-align: right; white-space: nowrap; }
+
+.sheet-flow { padding: 0 18px 6px; }
+
+.flow-svg { display: block; }
+
+.flow-node-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  fill: var(--ink);
+}
+
+.flow-node-count {
+  font-size: 10.5px;
+  fill: var(--muted);
+}
+
+.flow-node {
+  stroke-width: 1px;
+}
+
+.flow-node-bucket { stroke-dasharray: none; }
+
+.flow-ribbon {
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+}
+
+.flow-ribbon:hover { opacity: 0.95; }
+
+.comp-info {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.knob-check {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  row-gap: 4px;
+}
+
+.knob-check input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.knob-check small { grid-column: 1 / -1; }

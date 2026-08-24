@@ -35,6 +35,11 @@ DEFAULT_VIOLATION_TOLERANCE = 0.01
 관계를 버리면 그래프가 조각난다. 1% 는 실측에서 정한 값이다.
 """
 
+try:  # 값 포함 탐사의 예산 기본값. 순환 참조를 피하려 늦게 읽는다.
+    from tablefold.relate.discover import DEFAULT_MAX_PROBES
+except ImportError:  # pragma: no cover — discover 가 항상 함께 배포된다
+    DEFAULT_MAX_PROBES = 24
+
 
 class Cursor(Protocol):
     """``execute`` / ``fetchone`` 만 쓴다. 드라이버는 상관없다."""
@@ -147,14 +152,72 @@ def recover_with_data(
     targets: tuple[str, ...] | None = None,
     tolerance: float = DEFAULT_VIOLATION_TOLERANCE,
     dialect: str = "tsql",
+    bridge_middles: bool = True,
+    probe_values: bool = True,
+    max_probes: int = DEFAULT_MAX_PROBES,
 ) -> tuple[PhysicalSchema, tuple[ForeignKey, ...]]:
     """기본 키로 관계를 짓고, 데이터로 걸러 붙인 스키마와 그 관계들.
 
-    ``targets`` 는 참조 *대상* 이 될 수 있는 표를 제한한다. 비워 두면 나가는 키가
-    없는 표(= 차원)를 쓴다 — 팩트끼리 공유 키로 엮이는 것을 막는다.
+    ``targets`` 는 참조 *대상* 이 될 수 있는 표를 제한한다. 비워 두면 나가는
+    키가 없는 표(= 차원)부터 시작해 두 라운드로 넓힌다.
+
+    두 번째 라운드(:func:`bridge_middles`)가 스노우플레이크를 잇는다. 첫 라운드의
+    대상 제한("나가는 키가 없는 표")은 중간 차원을 못 잡는다 — ``F → D_MID →
+    D_TOP`` 에서 ``D_MID`` 는 나가는 키가 있어서 빠진다. 구조만으로는 중간 차원과
+    팩트를 가릴 수 없으므로 여기서는 데이터가 가르게 한다: 대상을 기본 키를 가진
+    모든 표로 넓히되, 통과한 엣지를 **형제 가드** 로 다시 검사한다.
+
+    형제 가드: 자식과 부보가 *이미 공유하는 조상* 이 있으면 그 엣지는 버린다.
+    팩트 둘이 같은 차원 코드를 들고 있으면 값 포함도 위반율도 다 통과하지만,
+    그건 관계가 아니라 사촌이다 — 둘 다 이미 ``D_ORG`` 에 닿아 있으므로 직접
+    엣지는 아무것도 사 오지 않는다. 반대로 진짜 중간 차원은 아직 아무도 닿지
+    않은 곳에 살아 있다. 드물게 진짜 관계도 같이 잘린다(두 경로가 다시 한 곳에서
+    만나는 모양) — 가짜 조인이 조용히 행을 복제하는 것보다 낫다.
+
+    ``probe_values`` 는 이름으로 설명되지 않는 컬럼까지 값을 센다
+    (:mod:`tablefold.relate.discover`). ``CUST_ID`` → ``MEMBER_NO`` 처럼 이름이
+    전혀 다른 관계가 이걸로 발견된다. 예산(``max_probes``)이 질의 수를 묶는다.
+
+    ``targets`` 를 명시하면 호출자의 의도가 우선이다 — 두 라운드 확장 없이 그
+    목록만 쓰고, 프로브와 형제 가드는 그대로 작동한다.
     """
+    from tablefold.relate.discover import (
+        infer_from_name_tokens,
+        probe_relationships,
+    )
     from tablefold.relate.graph import SchemaGraph
     from tablefold.relate.keys import infer_from_primary_keys
+
+    subsets = unique_single_keys(schema, cursor, dialect=dialect)
+    # 가상 테이블(합성·요약·파티션 결합)은 질의할 수 없다. 그 엣지는 만들 때부터
+    # 의도된 것이므로 검증 대상이 아니라 사실이다.
+    virtual = {t.name.lower() for t in schema.tables if t.is_virtual}
+
+    def candidates_for(round_targets: tuple[str, ...]) -> tuple[ForeignKey, ...]:
+        exact = infer_from_primary_keys(
+            schema,
+            targets=tuple(t for t in round_targets if t.lower() not in virtual),
+            unique_subsets=subsets,
+        )
+        # 토큰 후보는 정확 일치가 놓친 것만 남긴다. 같은 쌍이라면 정확 일치의
+        # 확신도(0.9)가 어휘소 추정(0.6)보다 낫다.
+        claimed = {
+            (fk.from_table.lower(), tuple(c.lower() for c in fk.from_columns))
+            for fk in exact
+        }
+        fuzzy = [
+            fk
+            for fk in infer_from_name_tokens(schema, targets=round_targets)
+            if (fk.from_table.lower(), tuple(c.lower() for c in fk.from_columns))
+            not in claimed
+        ]
+        merged = exact + tuple(fuzzy)
+        return tuple(
+            fk
+            for fk in merged
+            if fk.from_table.lower() not in virtual
+            and fk.to_table.lower() not in virtual
+        )
 
     if targets is None:
         graph = SchemaGraph.build(schema)
@@ -163,20 +226,96 @@ def recover_with_data(
             for t in schema.tables
             if not graph.out_degree(t.name) and t.primary_key
         )
-    if not targets:
-        return schema, ()
+        second_round = bridge_middles and bool(targets)
+    else:
+        second_round = False
 
-    candidates = infer_from_primary_keys(
-        schema,
-        targets=targets,
-        unique_subsets=unique_single_keys(schema, cursor, dialect=dialect),
-    )
-    recovered = validate_foreign_keys(
-        candidates, cursor, tolerance=tolerance, dialect=dialect
-    )
-    if not recovered:
+    accepted: list[ForeignKey] = []
+    seen: set[tuple[str, str, str]] = {
+        (
+            fk.from_table.lower(),
+            tuple(c.lower() for c in fk.from_columns),
+            fk.to_table.lower(),
+        )
+        for fk in schema.foreign_keys
+    }
+
+    # 형제 가드의 캐시. 받아들인 엣지가 늘어 그래프가 바뀌었을 때만 다시 짓고,
+    # 같은 그래프에서는 표별 도달 집합도 재사용한다.
+    guard_cache: dict[str, object] = {"n": -1}
+
+    def is_sibling_noise(candidate: ForeignKey) -> bool:
+        """자식과 후보 부모가 이미 공유 조상을 갖는가.
+
+        선언된 키와 지금까지 받아들인 엣지로 도달 집합을 계산한다. 자식이 이미
+        부모의 세계에 닿아 있으면(부모 자신, 또는 부모가 닿는 어느 표든) 이
+        엣지는 새로운 것을 사 오지 않는다 — 남는 것은 사촌 엣지나 순환뿐이다.
+        """
+        if guard_cache["n"] != len(accepted):
+            fks = schema.foreign_keys + tuple(accepted)
+            built = SchemaGraph.build(schema.with_foreign_keys(fks))
+            guard_cache["graph"] = built
+            guard_cache["reach"] = {}
+            guard_cache["n"] = len(accepted)
+        graph_built: SchemaGraph = guard_cache["graph"]  # type: ignore[assignment]
+        reach_map: dict[str, set[str]] = guard_cache["reach"]  # type: ignore[assignment]
+
+        def reach(table: str) -> set[str]:
+            key = table.lower()
+            if key not in reach_map:
+                reach_map[key] = {
+                    name.lower()
+                    for name, _ in graph_built.walk_many_to_one(table, max_hops=8)
+                }
+            return reach_map[key]
+
+        child = reach(candidate.from_table)
+        parent_key = candidate.to_table.lower()
+        return parent_key in child or bool(child & reach(candidate.to_table))
+
+    def admit(candidates: tuple[ForeignKey, ...], *, guard: bool) -> int:
+        added = 0
+        for candidate in candidates:
+            mark = (
+                candidate.from_table.lower(),
+                candidate.from_columns[0].lower(),
+                candidate.to_table.lower(),
+            )
+            if mark in seen:
+                continue
+            rate = violation_rate(candidate, cursor, dialect=dialect)
+            if rate > tolerance:
+                continue
+            measured = replace(candidate, confidence=round(1.0 - rate, 4))
+            if guard and is_sibling_noise(candidate):
+                continue
+            seen.add(mark)
+            accepted.append(measured)
+            added += 1
+        return added
+
+    admit(candidates_for(targets), guard=False)
+
+    if second_round:
+        wide_targets = tuple(t.name for t in schema.tables if t.primary_key)
+        admit(candidates_for(wide_targets), guard=True)
+
+    if probe_values:
+        working = schema.with_foreign_keys(schema.foreign_keys + tuple(accepted))
+        # 프로브 후보도 형제 가드를 거친다. 팩트끼리 공유하는 코드 영역은 값
+        # 포함을 통과하지만, 그것은 관계가 아니라 사촌이다.
+        probed = []
+        for fk in probe_relationships(
+            working, cursor, dialect=dialect, max_probes=max_probes
+        ):
+            if not is_sibling_noise(fk):
+                probed.append(fk)
+        accepted.extend(probed)
+
+    if not accepted:
         return schema, ()
-    return schema.with_foreign_keys(schema.foreign_keys + recovered), recovered
+    merged = schema.with_foreign_keys(schema.foreign_keys + tuple(accepted))
+    return merged, tuple(accepted)
 
 
 # ── 잡일 ──────────────────────────────────────────────────────────────────────

@@ -46,9 +46,26 @@ _QUALIFIED = re.compile(r"\b([A-Za-z][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)")
 # ``WHERE`` 가 별칭으로 잡힌다.
 _NOT_AN_ALIAS = frozenset(
     {
-        "where", "group", "order", "having", "on", "left", "right", "inner",
-        "outer", "full", "cross", "join", "union", "and", "or", "select",
-        "limit", "offset", "with", "as",
+        "where",
+        "group",
+        "order",
+        "having",
+        "on",
+        "left",
+        "right",
+        "inner",
+        "outer",
+        "full",
+        "cross",
+        "join",
+        "union",
+        "and",
+        "or",
+        "select",
+        "limit",
+        "offset",
+        "with",
+        "as",
     }
 )
 
@@ -117,9 +134,7 @@ class GoldCase:
         return {k: frozenset(v) for k, v in found.items()}
 
 
-def schema_gap(
-    cases: tuple[GoldCase, ...], schema
-) -> dict[str, frozenset[str]]:
+def schema_gap(cases: tuple[GoldCase, ...], schema) -> dict[str, frozenset[str]]:
     """정답 SQL 이 읽는데 스키마에 없는 ``표 -> {컬럼}``.
 
     답할 수 없는 케이스의 원인이 레이어인지 **스키마 자체**인지를 가른다. 스키마에

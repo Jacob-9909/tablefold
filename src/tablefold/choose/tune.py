@@ -82,9 +82,7 @@ def knee(points: tuple[CurvePoint, ...]) -> CurvePoint | None:
     if not points:
         return None
     best = max(p.answered for p in points)
-    return min(
-        (p for p in points if p.answered == best), key=lambda p: p.prompt_budget
-    )
+    return min((p for p in points if p.answered == best), key=lambda p: p.prompt_budget)
 
 
 def render(points: tuple[CurvePoint, ...]) -> str:
@@ -93,8 +91,7 @@ def render(points: tuple[CurvePoint, ...]) -> str:
         return "no points measured"
     best = knee(points)
     lines = [
-        f"{'예산(자)':>10}{'실제':>9}{'모델':>6}{'필드':>6}"
-        f"{'답변':>10}{'주제':>8}",
+        f"{'예산(자)':>10}{'실제':>9}{'모델':>6}{'필드':>6}{'답변':>10}{'주제':>8}",
     ]
     for point in points:
         mark = "  ← 포화" if best is not None and point is best else ""

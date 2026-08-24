@@ -35,9 +35,7 @@ def to_graph(
     붙는다. 없으면 노드는 스키마에서 읽을 수 있는 것만 들고 나간다.
     """
     scores = profiles or {}
-    covered = {
-        t for m in layer.models for t in ({m.base_table.lower()} | _absorbed(m))
-    }
+    covered = {t for m in layer.models for t in ({m.base_table.lower()} | _absorbed(m))}
 
     nodes = [
         {
@@ -128,9 +126,7 @@ def _model_lineage(model: LogicalModel) -> dict[str, Any]:
                 if any(s.cardinality is Cardinality.ONE_TO_MANY for s in f.source.path)
                 else "many_to_one"
             )
-            entry["path"] = [
-                f"{s.from_table} → {s.to_table}" for s in f.source.path
-            ]
+            entry["path"] = [f"{s.from_table} → {s.to_table}" for s in f.source.path]
 
     sources = sorted(
         by_table.values(),

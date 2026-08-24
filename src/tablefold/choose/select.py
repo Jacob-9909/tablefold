@@ -259,6 +259,11 @@ class ExplicitSelector:
         self._anchors = tuple(anchors)
         self._prune = prune_redundant
 
+    @property
+    def anchors(self) -> tuple[str, ...]:
+        """호출자가 지목한 앵커 이름들. 확장하려 이전 목록을 읽는 호출자용."""
+        return self._anchors
+
     def select(self, lattice: CandidateLattice, policy: SelectionPolicy) -> Selection:
         if not lattice.candidates:
             return Selection((), StopReason.NO_CANDIDATES, self.label)
@@ -293,11 +298,7 @@ def _pairs_of(candidate: Candidate) -> set[frozenset[str]]:
     조합을 다른 앵커가 이미 담고 있으면 새로 답할 수 있게 되는 질문은 없다.
     """
     members = sorted(candidate.reach)
-    return {
-        frozenset((a, b))
-        for i, a in enumerate(members)
-        for b in members[i + 1 :]
-    }
+    return {frozenset((a, b)) for i, a in enumerate(members) for b in members[i + 1 :]}
 
 
 def _drop_redundant(candidates: list[Candidate]) -> list[Candidate]:

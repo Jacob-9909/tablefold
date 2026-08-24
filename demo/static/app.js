@@ -42,8 +42,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   await discoverSources();
   await loadSample({ silent: true });
+  // 자동 탐색은 처음에 돌리지 않는다. 그렸던 숫자가 몇 초 뒤 스스로 바뀌면
+  // 읽는 사람은 측정값이 아니라 화면 결함으로 본다. 탐색은 버튼을 누른 사람이
+  // 기다리겠다고 선언했을 때만 한다.
   runFold();
-  runAutoTune();
 });
 
 
@@ -317,6 +319,7 @@ function readSettings() {
     max_cost: parseFloat($("maxCost").value),
     prompt_budget: Number.isFinite(promptBudget) ? promptBudget : null,
     max_areas: parseInt($("maxAreas").value, 10),
+    monthly_summaries: $("monthlySummaries") ? $("monthlySummaries").checked : false,
   };
 }
 
@@ -415,8 +418,76 @@ function render(data) {
   renderLeftover(data);
   window.renderLineage?.(data.lineage);
   window.renderFidelity?.(data.fidelity);
+  renderCompression(data.compression, data.information);
   renderPresets(data);
   renderAdvanced(data);
+}
+
+/**
+ * 컬럼 압축 스트립. "무엇이 줄었나"의 반대편 축인 "몇 개가 몇 개로 접혔나".
+ *
+ * 비율 하나만 크게 보면 근거가 안 보여서 믿기 어렵다. 물리 컬럼 수와 논리
+ * 필드 수를 나란히 놓고, 아래에 모델별 유입 통로를 막대로 보여 준다.
+ */
+function renderCompression(comp, info) {
+  const panel = $("compressionPanel");
+  if (!panel) return;
+  if (!comp || !comp.models || !comp.models.length) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  // 비율이 1을 넘으면 압축이다. 넘지 못하면 같은 컬럼이 합계·조건 등 여러
+  // 통로로 나뉜 것이라서 항목 수가 컬럼 수보다 많아진다 — 이걸 "압축됐다"고
+  // 쓰면 거짓말이 된다. 보이는 대로 쓴다.
+  const ratioText =
+    comp.ratio >= 1.5
+      ? `${comp.ratio}:1 압축`
+      : comp.ratio >= 1
+        ? `${comp.ratio}:1`
+        : `항목 1개당 물리 컬럼 ${(comp.logical_fields / (comp.physical_columns || 1)).toFixed(1)}개`;
+
+  let infoLine = "";
+  if (info && info.duplication_factor != null) {
+    const dup =
+      info.duplication_factor > 1
+        ? `같은 컬럼이 평균 ${info.duplication_factor}개 통로로 복제돼 있습니다`
+        : `컬럼 중복 없이 1:1 로 옮겼습니다`;
+    if (info.measured && info.retention != null) {
+      const pct = Math.round(info.retention * 100);
+      infoLine = `정보 보존율 ${pct}% (원본 ${num(Math.round(info.source_bits))}비트 → 노출 ${num(Math.round(info.exposed_bits))}비트) · ${dup}.`;
+    } else {
+      const skipped = (info.unmeasured_tables || []).length;
+      infoLine =
+        `${dup}` +
+        (skipped
+          ? ` · 가상 표 ${skipped}개는 카디널리티를 측정할 수 없어 비트 보존율이 생략됩니다.`
+          : " · 데이터에 연결되면 비트 단위 정보 보존율까지 측정됩니다.");
+    }
+  }
+
+  $("compressionStrip").innerHTML = `
+    <div class="comp-ratio">
+      <span class="comp-num">${num(comp.physical_columns)}</span>
+      <span class="comp-arrow">→</span>
+      <span class="comp-num comp-num-after">${num(comp.logical_fields)}</span>
+      <span class="comp-label">물리 컬럼 → 논리 항목 · ${ratioText}</span>
+    </div>
+    ${infoLine ? `<p class="comp-info">${esc(infoLine)}</p>` : ""}
+    <div class="comp-models">
+      ${comp.models
+        .map((m) => {
+          const width = Math.min(100, (m.logical_fields / (comp.logical_fields || 1)) * 100);
+          const title = `${m.name}: 표 ${m.source_tables}개에서 ${m.logical_fields}개 · 최대 ${m.max_hops}홉`;
+          return `<div class="comp-row" title="${esc(title)}">
+            <span class="comp-name">${esc(m.name)}</span>
+            <span class="comp-bar"><i style="width:${width}%"></i></span>
+            <span class="comp-val">${num(m.source_tables)}표→${num(m.logical_fields)}항목</span>
+          </div>`;
+        })
+        .join("")}
+    </div>`;
 }
 
 function renderHeadline(data) {
@@ -656,6 +727,9 @@ function openSheet(model) {
       ? `${model.absorbed_tables.join(", ")}의 내용이 이미 붙어 있습니다.`
       : "붙여 온 표는 없습니다."
   }`;
+
+  // 컬럼 흐름도: 어느 표의 컬럼이 몇 개, 어떤 통로로 들어왔는지.
+  window.renderColumnFlow?.($("sheetFlow"), model);
 
   const groups = ["base", "joined", "aggregated", "filter"];
   $("sheetBody").innerHTML = groups

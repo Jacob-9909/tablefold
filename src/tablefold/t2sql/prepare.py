@@ -54,15 +54,26 @@ class Preparation:
     declared_keys: int
     recovered_keys: int
     validated: bool
+    consolidated_tables: int = 0
+    """기간 파티션(월별 스냅샷)을 한 벌로 합친 표 수.
+
+    합쳐진 표는 원본 이름에서 접미사를 뗀 가상 테이블이 된다
+    (:mod:`tablefold.relate.consolidate`). 0 이면 합쳐진 것이 없다는 뜻이다.
+    """
 
     @property
     def note(self) -> str:
         layer = self.result.layer
         how = "데이터로 검증" if self.validated else "스키마만 봄"
+        merged = (
+            f" · 파티션 결합 {self.consolidated_tables}"
+            if self.consolidated_tables
+            else ""
+        )
         return (
             f"{len(layer.models)}개 모델 · {layer.field_count}개 필드 · "
             f"외래 키 선언 {self.declared_keys} + 복구 {self.recovered_keys}"
-            f"({how})"
+            f"({how}){merged}"
         )
 
 
@@ -75,6 +86,9 @@ def prepare_for_questions(
     max_hops: int = STAR_MAX_HOPS,
     period_anchor: bool = True,
     prompt_budget: int | None = None,
+    consolidate_partitions: bool = True,
+    monthly_summaries: bool = False,
+    dedupe_equivalents: bool = False,
 ) -> Preparation:
     """질문에 답할 수 있게 접는다.
 
@@ -90,10 +104,32 @@ def prepare_for_questions(
     ``YYYYMM`` 이 7개 팩트에 있는데 캘린더 테이블이 없어서, 기간 입도에서 묻는
     질문을 받을 앵커가 아예 없었다. 이미 그 키를 소유한 표가 있으면 아무것도
     하지 않으므로 켜 두는 쪽이 기본이다.
+
+    ``consolidate_partitions`` 는 월별 스냅샷(``F_LEDGER_202506`` …)을 가상
+    테이블 한 벌로 합친다 (:func:`~tablefold.relate.consolidate.consolidate_snapshots`).
+    합치지 않으면 같은 질문이 스냅샷 수만큼 모델로 갈라진다. 복구보다 먼저 하는
+    이유는, 합친 뒤의 스키마가 더 작아서 관계 복구와 기간 앵커의 중복 일도
+    줄어들기 때문이다.
+
+    ``monthly_summaries`` 는 팩트마다 월 입도 요약 가상 테이블을 세운다
+    (:func:`~tablefold.relate.synthesize.add_monthly_summaries`). 행이 진짜로
+    줄어드는 유일한 압축이다 — 추세 질문은 요약, 상세 질문은 원본이 답한다.
+    모델 수가 늘어나므로 기본은 꺼짐이다.
+
+    ``dedupe_equivalents`` 는 값이 항상 함께 결정되는 컬럼 묶음을 찾아 레이어에서
+    별칭을 접는다 (:mod:`tablefold.relate.equivalence`). 판정이 데이터라 커서가
+    필요하고, 없으면 조용히 건너뛴다 — 이름으로 지어내지 않겠다는 약속이다.
     """
     declared = sum(1 for fk in schema.foreign_keys if not fk.inferred)
     recovered = already_recovered
     validated = already_recovered > 0 and cursor is None
+    consolidated = 0
+
+    if consolidate_partitions:
+        from tablefold.relate.consolidate import consolidate_snapshots
+
+        schema, reports = consolidate_snapshots(schema)
+        consolidated = len(reports)
 
     if recover:
         if cursor is not None:
@@ -108,14 +144,37 @@ def prepare_for_questions(
     if period_anchor:
         schema = add_period_anchor(schema)
 
+    if monthly_summaries:
+        from tablefold.relate.synthesize import add_monthly_summaries
+
+        schema, _ = add_monthly_summaries(schema)
+
+    result = fold_star_schema(
+        schema,
+        max_hops=max_hops,
+        prompt_budget=prompt_budget,
+        infer_missing_keys=False,
+    )
+
+    if dedupe_equivalents and cursor is not None:
+        from dataclasses import replace as _dc_replace
+
+        from tablefold.relate.equivalence import dedupe_fields, find_equivalents
+
+        groups = find_equivalents(schema, cursor)
+        layer, removed = dedupe_fields(result.layer, groups)
+        if removed:
+            aliases = tuple(
+                (g.table.lower(), alias.lower())
+                for g in groups
+                for alias in g.columns[1:]
+            )
+            result = _dc_replace(result, layer=layer, merged_aliases=aliases)
+
     return Preparation(
-        result=fold_star_schema(
-            schema,
-            max_hops=max_hops,
-            prompt_budget=prompt_budget,
-            infer_missing_keys=False,
-        ),
+        result=result,
         declared_keys=declared,
         recovered_keys=recovered,
         validated=validated,
+        consolidated_tables=consolidated,
     )

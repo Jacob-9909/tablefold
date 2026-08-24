@@ -239,10 +239,7 @@ def test_joined_fields_can_keep_their_original_names(retail_graph):
     )
 
     joined = [
-        f
-        for m in layer.models
-        for f in m.fields
-        if f.source.kind is FieldKind.JOINED
+        f for m in layer.models for f in m.fields if f.source.kind is FieldKind.JOINED
     ]
     assert joined
     # 접두사가 붙지 않았으므로 이름이 원본 컬럼과 같거나, 충돌해서 구분된 것뿐이다.
@@ -335,3 +332,31 @@ def test_a_filter_only_field_inside_an_or_is_rejected(filterable_layer, retail_g
 def test_filters_are_off_by_default(tiny_layer):
     """기본값에서는 필터 전용 필드가 생기지 않는다 — 레이어가 부풀지 않도록."""
     assert not [f for m in tiny_layer.models for f in m.fields if f.filter_only]
+
+
+def test_a_parenthesized_and_still_pushes_down(filterable_layer, retail_graph):
+    """LLM 이 습관처럼 붙이는 괄호 하나가 pushdown 을 막아선 안 된다.
+
+    ``WHERE (조건 AND 조건)`` 의 괄호는 뜻을 바꾸지 않는다. 괄호를 불투명하게
+    다루던 시절에는 이 질의가 ``FilterOnlyMisuse`` 로 죽었고, 죽은 자리는
+    유료 수리 라운드가 메웠다 — 구조적으로 불가능한 목표를 붙들고.
+    """
+    expansion = expand(
+        "SELECT id, order_items_quantity_sum FROM orders "
+        "WHERE (order_items_product_id = 7 AND id > 10)",
+        filterable_layer,
+        retail_graph,
+    )
+
+    assert "product_id = 7" in expansion.sql
+    assert "GROUP BY" in expansion.sql
+
+
+def test_a_parenthesized_or_is_still_rejected(filterable_layer, retail_graph):
+    """괄호 풀기가 OR 까지 풀면 뜻이 달라진다. OR 덩어리는 그대로 남는다."""
+    with pytest.raises(ExpansionError, match="filter-only"):
+        expand(
+            "SELECT id FROM orders WHERE (order_items_product_id = 7 OR id > 10)",
+            filterable_layer,
+            retail_graph,
+        )

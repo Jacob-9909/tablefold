@@ -14,6 +14,7 @@ from tablefold.ir import PhysicalSchema
 from tablefold.read.ddl import DDLIntrospector
 from tablefold.report import prompt as emit
 from tablefold.rewrite.expand import ExpansionError, expand
+from tablefold.t2sql.prepare import dialect_for_live
 from tablefold.t2sql.preset import STAR_MAX_HOPS, recover_relationships
 
 app = typer.Typer(
@@ -229,8 +230,9 @@ def tune_command(
         fg=typer.colors.CYAN,
         err=True,
     )
-    typer.echo(tuning.render(tuning.curve(physical, cases, budgets=chosen,
-                                          max_hops=max_hops)))
+    typer.echo(
+        tuning.render(tuning.curve(physical, cases, budgets=chosen, max_hops=max_hops))
+    )
 
 
 @app.command("expand")
@@ -250,6 +252,7 @@ def expand_command(
     max_models: MaxModelsOption = None,
     max_hops: HopsOption = 3,
     field_budget: FieldsOption = 200,
+    mssql: MssqlOption = False,
     dialect: Annotated[
         str, typer.Option("--dialect", help="Target SQL dialect.")
     ] = "postgres",
@@ -271,7 +274,12 @@ def expand_command(
         max_models=max_models,
         max_hops=max_hops,
         field_budget=field_budget,
+        mssql=mssql,
     )
+    if mssql:
+        # 라이브 소스는 MSSQL 이다. 기본값 postgres 를 그대로 두면 LIMIT 이
+        # 섞여 나와 실행 단계에서 죽는다 — generate 의 star 경로와 같은 규칙.
+        dialect = dialect_for_live(dialect)
 
     # 승인된 레이어가 있으면 **그것을** 쓴다. 다시 접으면 설정이 조금만 달라도
     # 다른 레이어가 나오고, 승인한 것과 다른 계약을 상대로 확장하게 된다.
@@ -413,13 +421,11 @@ def generate_command(
         generate_sql,
         recover_relationships,
     )
-    from tablefold.t2sql.prepare import dialect_for_live, prepare_for_questions
+    from tablefold.t2sql.prepare import prepare_for_questions
     from tablefold.t2sql.trace import enable_logging, render_trace
 
     if verbose or trace_full:
-        enable_logging(
-            logging.DEBUG if trace_full else logging.INFO, stream=sys.stderr
-        )
+        enable_logging(logging.DEBUG if trace_full else logging.INFO, stream=sys.stderr)
 
     if star:
         if mssql:
@@ -467,7 +473,10 @@ def generate_command(
             max_models=max_models,
             max_hops=max_hops,
             field_budget=field_budget,
+            mssql=mssql,
         )
+        if mssql:
+            dialect = dialect_for_live(dialect)
 
     try:
         # 예시는 스키마에 안 맞으면 `valid_examples` 가 전부 뺀다. 다른 스키마에
@@ -507,7 +516,6 @@ def generate_command(
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
-
 def _run_fold(
     *,
     ddl: Path | None,
@@ -520,8 +528,15 @@ def _run_fold(
     max_models: int | None,
     max_hops: int,
     field_budget: int,
+    mssql: bool = False,
 ) -> FoldResult:
-    physical = _load_schema(ddl=ddl, dsn=dsn, schema=schema)
+    # ``--mssql`` 은 star 경로에서만 먹었다. greedy 는 조용히 DDL/DSN 요구로
+    # 빠져나가 같은 데이터베이스에 같은 질문이 다른 방언·다른 관계로 답했다 —
+    # 이 저장소가 세 번 고친 "CLI 와 화면이 갈라진다"의 또 한 명.
+    if mssql:
+        physical, _how = _load_and_validate(schema, recover=True)
+    else:
+        physical = _load_schema(ddl=ddl, dsn=dsn, schema=schema)
     return fold(
         physical,
         selector=_build_selector(llm),

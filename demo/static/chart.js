@@ -587,4 +587,194 @@
   // 전역 함수로 외부에 노출 (script 태그로 먼저 로드되므로 window 객체에 할당)
   window.renderLineage = renderLineage;
   window.renderFidelity = renderFidelity;
+
+  // ── 컬럼 흐름도 (모델 상세) ──────────────────────────────────────────────
+  //
+  // "이 모델의 항목들이 어느 표에서 어떻게 왔나"를 리본으로 보여 준다. 왼쪽이
+  // 물리 표, 오른쪽이 접힌 결과 네 통(기본값 · 붙여 온 값 · 미리 합계 낸 값 ·
+  // 조건 전용)이다. 리본 굵기가 컬럼 수다 — 굵은 리본이 압축을 만든 주범이다.
+  //
+  // ERD 가 "표끼리의 구조"를 그린다면 이것은 "컬럼의 물류"를 그린다. 둘이 같은
+  // 데이터를 다르게 읽는 것이다.
+
+  const FLOW_W = 580;
+  const NODE_W = 132;
+  const ROW = 18;
+  const GAP = 10;
+  const FLOW_PAD = 14;
+
+  const KIND_META = {
+    base: { label: "표 자신의 항목", color: "var(--base, #2f5eaa)" },
+    joined: { label: "붙여 온 항목", color: "var(--joined, #4b9b7a)" },
+    aggregated: { label: "미리 합계 낸 항목", color: "var(--aggregated, #8a6516)" },
+    filter: { label: "조건에만 쓰는 항목", color: "var(--filter, #8a8a82)" },
+  };
+
+  function renderColumnFlow(container, model) {
+    if (!container || !model || !Array.isArray(model.fields)) return;
+    container.innerHTML = "";
+
+    // 표별로 네 통에 몇 개씩 넣었는지 센다.
+    const tables = new Map();
+    const buckets = ["base", "joined", "aggregated", "filter"];
+    const bucketTotals = { base: 0, joined: 0, aggregated: 0, filter: 0 };
+
+    for (const f of model.fields) {
+      const kind = f.filter_only ? "filter" : (f.kind || "base");
+      const table = (f.source && f.source.table) || "?";
+      bucketTotals[kind] += 1;
+      let entry = tables.get(table);
+      if (!entry) {
+        entry = { table, counts: { base: 0, joined: 0, aggregated: 0, filter: 0 } };
+        tables.set(table, entry);
+      }
+      entry.counts[kind] += 1;
+    }
+
+    if (!tables.size) {
+      container.innerHTML = '<div class="empty">흐름을 그릴 항목이 없습니다.</div>';
+      return;
+    }
+
+    const leftNodes = [...tables.values()].sort(
+      (a, b) => sumCounts(b.counts) - sumCounts(a.counts) || a.table.localeCompare(b.table)
+    );
+    // 통(桶) 노드도 왼쪽과 같은 모양으로 만들어 같은 배치기를 쓴다.
+    const rightNodes = buckets
+      .map((k) => ({
+        table: KIND_META[k].label,
+        kind: k,
+        counts: { [k]: bucketTotals[k] },
+        isBucket: true,
+      }))
+      .filter((n) => n.counts[n.kind] > 0);
+
+    const leftH = leftNodes.reduce((h, n) => h + nodeHeight(n) + GAP, -GAP);
+    const rightH = rightNodes.reduce((h, n) => h + nodeHeight(n) + GAP, -GAP);
+    const canvasH = Math.max(leftH, rightH) + FLOW_PAD * 2 + HEAD_ROOM;
+    const midX = FLOW_PAD + NODE_W + (FLOW_W - (NODE_W * 2 + FLOW_PAD * 2)) / 2;
+
+    const svg = el("svg", {
+      viewBox: `0 0 ${FLOW_W} ${canvasH}`,
+      width: "100%",
+      class: "flow-svg",
+      role: "img",
+      "aria-label": `${model.name} 모델의 컬럼 유입 흐름`,
+    });
+
+    // 세로 가운데 정렬로 두 열을 놓는다.
+    placeColumn(leftNodes, FLOW_PAD, canvasH);
+    placeColumn(rightNodes, FLOW_W - FLOW_PAD - NODE_W, canvasH);
+
+    const linksLayer = el("g", {});
+    svg.appendChild(linksLayer);
+
+    // 리본: 표 → 통. 두께는 컬럼 수.
+    for (const node of leftNodes) {
+      let yFrom = node.y + FLOW_PAD + HEAD_ROOM_INNER;
+      for (const target of rightNodes) {
+        const count = node.counts[target.kind];
+        if (!count) continue;
+        const w = Math.max(3, count * RIBBON_PER_COLUMN);
+        const y0 = yFrom + w / 2;
+        const x1 = FLOW_W - FLOW_PAD - NODE_W;
+        const y1 = ribbonOffset(target, count);
+        yFrom += w;
+
+        const path = el("path", {
+          d: `M${FLOW_PAD + NODE_W} ${y0} C ${midX} ${y0}, ${midX} ${y1}, ${x1} ${y1}`,
+          class: "flow-ribbon",
+          stroke: KIND_META[target.kind].color,
+          "stroke-width": w,
+          fill: "none",
+        });
+        const tip = el("title");
+        tip.textContent =
+          `${node.table} → ${KIND_META[target.kind].label} ${count}개`;
+        path.appendChild(tip);
+        linksLayer.appendChild(path);
+      }
+    }
+
+    drawFlowNode(svg, leftNodes);
+    drawFlowNode(svg, rightNodes);
+
+    container.appendChild(svg);
+
+    // 리본 오프셋 계산용: 각 오른쪽 통에서 이미 쓴 두께를 기억한다.
+    function ribbonOffset(bucketNode, count) {
+      const w = Math.max(3, count * RIBBON_PER_COLUMN);
+      const key = bucketNode.kind;
+      bucketNode._used = bucketNode._used || {};
+      const start = bucketNode._used[key] || 0;
+      bucketNode._used[key] = start + w;
+      return bucketNode.y + FLOW_PAD + HEAD_ROOM_INNER + start + w / 2;
+    }
+  }
+
+  const RIBBON_PER_COLUMN = 7;   // 컬럼 하나당 리본 두께(px)
+  const HEAD_ROOM = 26;          // 위쪽 여백(제목 없음, 여유만)
+  const HEAD_ROOM_INNER = 12;    // 노드 안쪽 첫 리본까지 거리
+
+  function sumCounts(counts) {
+    return Object.values(counts).reduce((a, b) => a + b, 0);
+  }
+
+  function nodeHeight(node) {
+    return Math.max(sumCounts(node.counts) * RIBBON_PER_COLUMN + HEAD_ROOM_INNER * 2, ROW);
+  }
+
+  function placeColumn(nodes, x, canvasH) {
+    const totalH = nodes.reduce((h, n) => h + nodeHeight(n) + GAP, -GAP);
+    let y = Math.max(FLOW_PAD, (canvasH - totalH) / 2);
+    for (const n of nodes) {
+      n.x = x;
+      n.y = y;
+      y += nodeHeight(n) + GAP;
+    }
+  }
+
+  function drawFlowNode(svg, nodes) {
+    for (const node of nodes) {
+      const h = nodeHeight(node);
+      const g = el("g", {});
+
+      const rect = el("rect", {
+        x: node.x,
+        y: node.y,
+        width: NODE_W,
+        height: h,
+        rx: 6,
+        class: `flow-node${node.isBucket ? " flow-node-bucket" : ""}`,
+        stroke: node.isBucket ? KIND_META[node.kind].color : undefined,
+        fill: node.isBucket ? "var(--panel, #fff)" : "var(--accent-soft, #eaf0fa)",
+      });
+      g.appendChild(rect);
+
+      const nameText = el("text", {
+        x: node.x + 8,
+        y: node.y + 16,
+        class: "flow-node-name",
+      });
+      nameText.textContent = truncate(node.table, 17);
+      g.appendChild(nameText);
+
+      const countText = el("text", {
+        x: node.x + 8,
+        y: node.y + 32,
+        class: "flow-node-count",
+      });
+      countText.textContent = `${num(sumCounts(node.counts))}개`;
+      g.appendChild(countText);
+
+      svg.appendChild(g);
+    }
+  }
+
+  function truncate(text, max) {
+    const s = String(text ?? "");
+    return s.length > max ? s.slice(0, max - 1) + "…" : s;
+  }
+
+  window.renderColumnFlow = renderColumnFlow;
 })();

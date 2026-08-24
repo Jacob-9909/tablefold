@@ -29,3 +29,7 @@ htmlcov/
 .DS_Store
 .vercel
 .env*
+
+# Working documents — reports and spreadsheets, not code
+*.xlsx
+goldset_integration_test_report.md

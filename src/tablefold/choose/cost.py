@@ -31,10 +31,21 @@ NOISE_SUFFIXES = ("_hash", "_token", "_secret", "_password", "_salt")
 # 선택지만 늘린다 — 골드셋에서 실제로 값이 빈 컬럼이 답으로 골라졌다.
 NOISE_NAMES = frozenset(
     {
-        "load_dt", "load_user", "load_date", "load_time",
-        "etl_dt", "etl_id", "etl_user", "etl_date",
-        "create_dt", "update_dt", "insert_dt", "modify_dt",
-        "reg_dt", "chg_dt", "dw_load_dt",
+        "load_dt",
+        "load_user",
+        "load_date",
+        "load_time",
+        "etl_dt",
+        "etl_id",
+        "etl_user",
+        "etl_date",
+        "create_dt",
+        "update_dt",
+        "insert_dt",
+        "modify_dt",
+        "reg_dt",
+        "chg_dt",
+        "dw_load_dt",
     }
 )
 

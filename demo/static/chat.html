@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>tablefold Text-to-SQL AI Chatbot</title>
   <link rel="stylesheet" href="style.css">
+  <!-- 대시보드(style.css)와 같은 밝은 팔레트를 쓴다. 변수로만 색을 쓰면
+       두 화면이 다시 갈라지는 일이 없다. -->
   <style>
     .chat-container {
       max-width: 1000px;
@@ -12,47 +14,67 @@
       display: flex;
       flex-direction: column;
       height: calc(100vh - 160px);
-      background: var(--bg-card, #1e1e2d);
-      border-radius: 16px;
-      border: 1px solid var(--border-color, #2d2d3f);
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.37);
+      background: var(--panel);
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      box-shadow: 0 2px 12px rgba(28, 28, 26, 0.06);
       overflow: hidden;
     }
     .chat-header {
-      padding: 1.2rem 1.8rem;
-      background: rgba(255, 255, 255, 0.03);
-      border-bottom: 1px solid var(--border-color, #2d2d3f);
+      padding: 1.1rem 1.6rem;
+      border-bottom: 1px solid var(--line);
       display: flex;
       justify-content: space-between;
       align-items: center;
     }
     .chat-header h2 {
       margin: 0;
-      font-size: 1.25rem;
-      color: #fff;
+      font-size: 1.15rem;
+      color: var(--ink);
       display: flex;
       align-items: center;
       gap: 10px;
+    }
+    .chat-header .chat-sub {
+      font-size: 0.8rem;
+      font-weight: normal;
+      color: var(--muted);
     }
     .controls-bar {
       display: flex;
       align-items: center;
       gap: 15px;
-      padding: 0.8rem 1.8rem;
-      background: #181825;
-      border-bottom: 1px solid #313244;
+      padding: 0.7rem 1.6rem;
+      background: var(--bg);
+      border-bottom: 1px solid var(--line);
       font-size: 0.85rem;
-      color: #a6adc8;
+      color: var(--muted);
     }
     .controls-bar select {
-      background: #11111b;
-      border: 1px solid #313244;
-      color: #cdd6f4;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--ink);
       padding: 4px 10px;
       border-radius: 6px;
       font-size: 0.85rem;
       outline: none;
     }
+    .dialect-note { font-size: 0.82rem; color: var(--muted); }
+
+    /* 키가 없는 설치에서 챗봇 앞에 내려앉는 안내. 막았다는 사실과 이유,
+       그리고 여전히 쓸 수 있는 것을 함께 말한다. */
+    .llm-banner {
+      margin: 0.9rem 1.6rem 0;
+      padding: 12px 16px;
+      background: var(--accent-soft);
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      color: var(--ink);
+      font-size: 0.88rem;
+      line-height: 1.55;
+    }
+    .llm-banner b { color: var(--accent); }
+
     .chat-messages {
       flex: 1;
       overflow-y: auto;
@@ -75,19 +97,29 @@
     }
     .user-bubble {
       align-self: flex-end;
-      background: #4f46e5;
+      background: var(--accent);
       color: #fff;
       border-bottom-right-radius: 4px;
     }
     .ai-bubble {
       align-self: flex-start;
-      background: #181825;
-      color: #e2e8f0;
-      border: 1px solid #313244;
+      background: var(--bg);
+      color: var(--ink);
+      border: 1px solid var(--line);
       border-bottom-left-radius: 4px;
       width: 100%;
       box-sizing: border-box;
     }
+    .welcome-text { margin: 0; color: var(--muted); }
+
+    /* 응답 요약 문장. 배지 줄보다 위에서 한 번만 말한다 — 숫자 나열보다
+       문장 한 개가 "무엇을 했나"를 전한다. */
+    .plain-answer {
+      margin: 0 0 10px;
+      font-size: 0.92rem;
+      color: var(--muted);
+    }
+
     .badge-bar {
       display: flex;
       flex-wrap: wrap;
@@ -99,16 +131,15 @@
       padding: 4px 10px;
       border-radius: 6px;
       font-weight: 600;
-      background: #313244;
-      color: #89b4fa;
+      background: var(--accent-soft);
+      color: var(--accent);
     }
-    .badge-green { background: #11382b; color: #a6e3a1; }
-    .badge-purple { background: #33254e; color: #cba6f7; }
-    .badge-yellow { background: #453a1f; color: #f9e2af; }
+    .badge-green { background: #edf7f2; color: var(--joined); }
+    .badge-warn { background: #faf3e6; color: var(--aggregated); }
 
     .sql-box {
-      background: #11111b;
-      border: 1px solid #313244;
+      background: var(--panel);
+      border: 1px solid var(--line);
       border-radius: 8px;
       padding: 1rem;
       margin-top: 10px;
@@ -118,24 +149,49 @@
       font-size: 0.75rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      color: #9399b2;
+      color: var(--muted);
       margin-bottom: 6px;
       font-weight: 700;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
     }
+    .sql-box-title.accent { color: var(--accent); }
+    .sql-box.good { border-color: var(--joined); }
     .sql-box code {
-      font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
-      color: #a6e3a1;
-      font-size: 0.88rem;
+      font-family: var(--mono);
+      color: var(--ink);
+      font-size: 0.86rem;
       white-space: pre-wrap;
       word-break: break-all;
     }
+    /* 복사 버튼. 눌렀을 때 잠깐 라벨이 바뀌어 "됐다"가 보인다. */
+    .copy-btn {
+      font: inherit;
+      font-size: 0.72rem;
+      text-transform: none;
+      letter-spacing: 0;
+      background: none;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 2px 10px;
+      cursor: pointer;
+      color: var(--muted);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+
     .db-result-box {
-      background: #11111b;
-      border: 1px solid #313244;
+      background: var(--panel);
+      border: 1px solid var(--line);
       border-radius: 8px;
       padding: 1rem;
       margin-top: 12px;
     }
+    .db-result-box.error { border-color: var(--bad); }
+    .db-result-box.error .db-error-text { color: var(--bad); font-size: 0.85rem; white-space: pre-wrap; word-break: break-all; }
     .db-table {
       width: 100%;
       border-collapse: collapse;
@@ -143,27 +199,27 @@
       margin-top: 8px;
     }
     .db-table th {
-      background: #181825;
-      color: #89b4fa;
+      background: var(--bg);
+      color: var(--accent);
       padding: 8px 12px;
       text-align: left;
-      border-bottom: 1px solid #313244;
+      border-bottom: 1px solid var(--line);
       font-weight: 600;
       white-space: nowrap;
     }
     .db-table td {
       padding: 8px 12px;
-      border-bottom: 1px solid #1e1e2e;
-      color: #cdd6f4;
+      border-bottom: 1px solid var(--line);
+      color: var(--ink);
       white-space: nowrap;
     }
-    .db-table tr:hover td {
-      background: rgba(255, 255, 255, 0.03);
-    }
+    .db-table tr:hover td { background: var(--accent-soft); }
+    .empty-row { text-align: center; color: var(--muted); padding: 16px; }
+
     .chat-input-area {
-      padding: 1.2rem 1.5rem;
-      background: rgba(255, 255, 255, 0.02);
-      border-top: 1px solid var(--border-color, #2d2d3f);
+      padding: 1.1rem 1.5rem;
+      border-top: 1px solid var(--line);
+      background: var(--panel);
     }
     .preset-chips {
       display: flex;
@@ -173,39 +229,33 @@
       margin-bottom: 10px;
     }
     .chip {
-      background: #181825;
-      border: 1px solid #313244;
-      color: #b4befe;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--muted);
       padding: 6px 14px;
       border-radius: 20px;
       font-size: 0.82rem;
       cursor: pointer;
       white-space: nowrap;
-      transition: all 0.2s;
+      transition: color 0.12s, border-color 0.12s;
     }
-    .chip:hover {
-      background: #313244;
-      color: #fff;
-    }
-    .input-wrapper {
-      display: flex;
-      gap: 10px;
-    }
+    .chip:hover { border-color: var(--accent); color: var(--accent); }
+    .input-wrapper { display: flex; gap: 10px; }
     .input-wrapper input {
       flex: 1;
-      background: #181825;
-      border: 1px solid #313244;
+      background: var(--bg);
+      border: 1px solid var(--line);
       border-radius: 10px;
       padding: 12px 16px;
-      color: #fff;
+      color: var(--ink);
       font-size: 0.95rem;
       outline: none;
+      font-family: var(--sans);
     }
-    .input-wrapper input:focus {
-      border-color: #6366f1;
-    }
+    .input-wrapper input:focus { border-color: var(--accent); }
+    .input-wrapper input:disabled { opacity: 0.55; cursor: not-allowed; }
     .send-btn {
-      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      background: var(--accent);
       color: #fff;
       border: none;
       border-radius: 10px;
@@ -213,6 +263,8 @@
       font-weight: 600;
       cursor: pointer;
       transition: opacity 0.2s;
+      font-family: var(--sans);
+      font-size: 0.95rem;
     }
     .send-btn:hover { opacity: 0.9; }
     .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -223,18 +275,20 @@
 <header class="topbar">
   <div class="wrap topbar-inner">
     <div class="wordmark">tablefold</div>
-    <div class="nav-links">
+    <nav class="nav-links">
       <a href="/">📊 대시보드</a>
       <a href="/chat" class="active">💬 Text-to-SQL 챗봇</a>
-    </div>
+    </nav>
   </div>
 </header>
 
 <main class="wrap">
   <div class="chat-container">
     <div class="chat-header">
-      <h2>🤖 Text-to-SQL AI Assistant <span style="font-size: 0.8rem; font-weight: normal; color: #a0a0c0;">(Powered by tablefold Unified Pipeline)</span></h2>
+      <h2>🤖 Text-to-SQL AI Assistant <span class="chat-sub">(Powered by tablefold Unified Pipeline)</span></h2>
     </div>
+
+    <div id="llmBanner" class="llm-banner" hidden></div>
 
     <div class="controls-bar">
       <label>소스: 
@@ -246,18 +300,21 @@
         </select>
       </label>
 
-      <label>방언: 
+      <label id="dialectKnob">방언: 
         <select id="dialectSelect">
           <option value="postgres" selected>PostgreSQL</option>
           <option value="tsql">T-SQL / MSSQL</option>
         </select>
       </label>
+      <!-- 예제 소스에는 방언 선택이 없다. 데이터베이스가 없으므로 PostgreSQL
+           로 답하는 것이 정해져 있고, 고르게 보이면 거짓 선택이 된다. -->
+      <span id="dialectNote" class="dialect-note" hidden>예제 스키마는 PostgreSQL 문법으로 답합니다.</span>
     </div>
 
     <div class="chat-messages" id="chatMessages">
       <div class="chat-bubble ai-bubble">
         <div style="font-weight: 600; font-size: 1.05rem; margin-bottom: 6px;">안녕하세요! tablefold GenBI 챗봇입니다.</div>
-        <p style="margin: 0; color: #a6adc8;">
+        <p class="welcome-text">
           자연어 질의를 입력하시면 LLM이 **조인 없는 논리 SQL**을 작성하고, `tablefold expand`가 **최적화된 물리 CTE SQL**로 자동 재작성합니다.<br>
           데이터베이스가 연결된 경우 하단에 **실제 실행 결과 데이터 표**가 함께 표시됩니다.
         </p>
@@ -266,10 +323,10 @@
 
     <div class="chat-input-area">
       <div class="preset-chips">
-        <div class="chip" onclick="setQuestion('선택월말 기준 거래처별 매출액과 수금액 알려줘')">💡 거래처별 매출/수금액</div>
-        <div class="chip" onclick="setQuestion('선택년도 1월~12월 직책별 인건비 추이정보 조회')">💡 직책별 인건비 추이</div>
-        <div class="chip" onclick="setQuestion('사업장별 매출 실적 및 목표 달성률 조회')">💡 영업조직 달성률</div>
-        <div class="chip" onclick="setQuestion('두 달 전 기준 제품별 기초재고금액과 기말재고금액 조회')">💡 제품별 재고자산 현황</div>
+        <button type="button" class="chip" onclick="askQuestion('선택월말 기준 거래처별 매출액과 수금액 알려줘')">💡 거래처별 매출/수금액</button>
+        <button type="button" class="chip" onclick="askQuestion('선택년도 1월~12월 직책별 인건비 추이정보 조회')">💡 직책별 인건비 추이</button>
+        <button type="button" class="chip" onclick="askQuestion('사업장별 매출 실적 및 목표 달성률 조회')">💡 영업조직 달성률</button>
+        <button type="button" class="chip" onclick="askQuestion('두 달 전 기준 제품별 기초재고금액과 기말재고금액 조회')">💡 제품별 재고자산 현황</button>
       </div>
       <form class="input-wrapper" id="chatForm" onsubmit="handleSend(event)">
         <input type="text" id="userInput" placeholder="질문을 입력하세요... (예: 선택월말 기준 거래처별 매출액과 수금액 알려줘)" required autocomplete="off">
@@ -280,15 +337,42 @@
 </main>
 
 <script>
-  function setQuestion(text) {
-    document.getElementById('userInput').value = text;
-    document.getElementById('userInput').focus();
+  const $ = (id) => document.getElementById(id);
+
+  // 오류문·SQL·표 안의 모든 텍스트는 이스케이프해서 넣는다. 응답 어딘가에
+  // HTML 이 섞여 들어오더라도 글자로밖에 안 보인다.
+  function escapeHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // 원래 오류문은 개발자용이다. 자주 나는 실패만 한국어로 옮기고, 모르는 것은
+  // 그대로 보여 주되 이스케이프만 한다 — 숨기면 대응도 못 한다.
+  function friendlyError(raw) {
+    const msg = String(raw || '');
+    if (/OPENAI_API_KEY|ANTHROPIC_API_KEY|ProviderUnavailable/i.test(msg)) {
+      return 'LLM 키가 설정되지 않았습니다';
+    }
+    if (/timeout|timed?\s*out|network|connection|연결|시간\s*초과/i.test(msg)) {
+      return '서버 응답이 지연됩니다. 잠시 후 다시 시도하세요.';
+    }
+    return msg;
+  }
+
+  function askQuestion(text) {
+    const input = $('userInput');
+    if (input.disabled) return;
+    input.value = text;
+    handleSend(new Event('submit'));
   }
 
   // 라이브 소스는 접속이 있을 때만 고를 수 있다. 없는데 남겨 두면 첫 질문이
   // 503 으로 끝나고, 읽는 사람은 챗봇이 고장 난 줄 안다.
-  document.addEventListener('DOMContentLoaded', async () => {
-    const select = document.getElementById('sourceSelect');
+  async function syncSourceAvailability() {
+    const select = $('sourceSelect');
     const live = select.querySelector('option[value="live"]');
     try {
       const info = await (await fetch('/api/sources')).json();
@@ -301,19 +385,63 @@
       live.disabled = true;
       select.value = 'ddl';
     }
+  }
+
+  // 예제(DDL) 소스는 방언을 정할 여지가 없다. 선택기를 숨기고 무엇으로 답하는지
+  // 말한다. 라이브에서만 선택값이 의미가 있다(서버의 dialect_for_live).
+  function syncDialectUI() {
+    const source = $('sourceSelect').value;
+    const live = source === 'live' || source === 'financial';
+    $('dialectKnob').hidden = !live;
+    $('dialectNote').hidden = live;
+  }
+
+  // 키가 없으면 입력창이 실패 확정인 버튼이 된다. 미리 막고 이유를 안내한다.
+  // 확인 자체를 못 했으면 열어 둔다 — 막으면 키가 있는 설치까지 못 쓴다.
+  async function syncChatCapability() {
+    let available;
+    try {
+      const info = await (await fetch('/api/chat-capability')).json();
+      available = Boolean(info.llm_available);
+    } catch {
+      return;
+    }
+    if (available) return;
+
+    const banner = $('llmBanner');
+    banner.innerHTML =
+      '💡 <b>챗봇을 사용할 수 없습니다.</b> 이 데모 환경에는 LLM 키가 없어 챗봇을 사용할 수 없습니다. 스키마 탐색과 확장 놀이터는 정상 동작합니다.';
+    banner.hidden = false;
+    $('userInput').disabled = true;
+    $('userInput').placeholder = 'LLM 키가 없어 챗봇을 사용할 수 없습니다';
+    $('sendBtn').disabled = true;
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    $('sourceSelect').addEventListener('change', syncDialectUI);
+    syncSourceAvailability().then(syncDialectUI);
+    syncChatCapability();
+
+    // 결과는 매번 innerHTML 로 다시 그려지므로 복사 버튼에 위임 걸어 둔다.
+    $('chatMessages').addEventListener('click', (e) => {
+      const btn = e.target.closest('.copy-btn');
+      if (btn) copyWithFeedback(btn);
+    });
   });
 
   async function handleSend(e) {
     e.preventDefault();
-    const input = document.getElementById('userInput');
+    const input = $('userInput');
     const question = input.value.trim();
     if (!question) return;
 
-    const source = document.getElementById('sourceSelect').value;
-    const dialect = document.getElementById('dialectSelect').value;
+    const source = $('sourceSelect').value;
+    // 예제 소스에는 방언을 강요하지 않는다. 비워 보내면 서버가 소스에 맞게 정한다.
+    const live = source === 'live' || source === 'financial';
+    const dialect = live ? $('dialectSelect').value : '';
 
     input.value = '';
-    const messages = document.getElementById('chatMessages');
+    const messages = $('chatMessages');
 
     // Add User Bubble
     const userBubble = document.createElement('div');
@@ -324,11 +452,11 @@
     // Add AI Loading Bubble
     const aiBubble = document.createElement('div');
     aiBubble.className = 'chat-bubble ai-bubble';
-    aiBubble.innerHTML = '<div style="color: #89b4fa;">⚡ LLM 논리 SQL 라우팅, tablefold 확장 및 DB 조회 실행 중...</div>';
+    aiBubble.innerHTML = '<div style="color: var(--accent);">⚡ LLM 논리 SQL 생성, tablefold 확장 및 DB 조회 실행 중...</div>';
     messages.appendChild(aiBubble);
     messages.scrollTop = messages.scrollHeight;
 
-    const btn = document.getElementById('sendBtn');
+    const btn = $('sendBtn');
     btn.disabled = true;
 
     try {
@@ -346,90 +474,134 @@
       btn.disabled = false;
 
       if (!res.ok) {
-        aiBubble.innerHTML = `<div style="color: #f38ba8;">❌ 오류 발생: ${data.detail || 'SQL 생성 실패'}</div>`;
+        aiBubble.innerHTML = `<div style="color: var(--bad);">❌ ${escapeHtml(friendlyError(data.detail || 'SQL 생성 실패'))}</div>`;
         return;
       }
 
-      // Build DB Result Table HTML
-      let dbTableHtml = '';
-      if (data.execution_result) {
-        const exec = data.execution_result;
-        if (exec.status === 'success' && exec.columns && exec.columns.length > 0) {
-          const headerCols = exec.columns.map(c => `<th>${escapeHtml(c)}</th>`).join('');
-          let bodyRows = '';
-          if (exec.rows && exec.rows.length > 0) {
-            bodyRows = exec.rows.map(row => {
-              const cells = exec.columns.map(c => `<td>${escapeHtml(String(row[c] !== undefined && row[c] !== null ? row[c] : ''))}</td>`).join('');
-              return `<tr>${cells}</tr>`;
-            }).join('');
-          } else {
-            bodyRows = `<tr><td colspan="${exec.columns.length}" style="text-align: center; color: #9399b2; padding: 16px;">조회된 데이터 행이 없습니다 (DB 쿼리 구문 정상, 데이터 0건)</td></tr>`;
-          }
-
-          dbTableHtml = `
-            <div class="db-result-box">
-              <div class="sql-box-title" style="color: #89b4fa; display:flex; justify-content: space-between;">
-                <span>📊 실제 DB 조회 결과 (${exec.row_count}건)</span>
-                <span style="font-weight: normal; color: #a6e3a1;">✅ 쿼리 실행 성공</span>
-              </div>
-              <div style="overflow-x: auto; max-height: 250px;">
-                <table class="db-table">
-                  <thead><tr>${headerCols}</tr></thead>
-                  <tbody>${bodyRows}</tbody>
-                </table>
-              </div>
-            </div>
-          `;
-        } else if (exec.status === 'error') {
-          dbTableHtml = `
-            <div class="db-result-box" style="border-color: #f38ba8;">
-              <div class="sql-box-title" style="color: #f38ba8;">⚠️ DB 쿼리 실행 오류</div>
-              <div style="color: #f38ba8; font-size: 0.85rem;">${escapeHtml(exec.error)}</div>
-            </div>
-          `;
-        } else if (exec.status === 'not_connected') {
-          dbTableHtml = `
-            <div class="db-result-box" style="border-color: #45475a;">
-              <div style="color: #9399b2; font-size: 0.82rem;">
-                💡 <b>실제 DB 연동 안내:</b> 스키마 쿼리 생성이 완료되었습니다. 실제 도커 DB 데이터 조회를 원하시면 <code>.env</code> 파일의 <code>TABLEFOLD_MSSQL_*</code> 접속 정보를 채워주세요.
-              </div>
-            </div>
-          `;
-        }
-      }
-
-      // Render Rich Result
-      aiBubble.innerHTML = `
-        <div class="badge-bar">
-          <span class="badge badge-purple">라우팅: ${data.routed_to || data.models_used.join(', ')}</span>
-          <span class="badge badge-green">조인 생략(Pruned): ${data.joins_pruned}개</span>
-          <span class="badge">생성 조인: ${data.joins_emitted}개</span>
-          ${data.preparation_note ? `<span class="badge badge-yellow">${escapeHtml(data.preparation_note)}</span>` : ''}
-          ${data.repairs > 0 ? `<span class="badge" style="background:#45475a; color:#f9e2af;">수리 횟수: ${data.repairs}회</span>` : ''}
-        </div>
-
-        <div class="sql-box">
-          <div class="sql-box-title">🧠 LLM 생성 논리 SQL (Logical Model Query)</div>
-          <code>${escapeHtml(data.logical_sql)}</code>
-        </div>
-
-        <div class="sql-box" style="border-color: #a6e3a1;">
-          <div class="sql-box-title" style="color: #a6e3a1;">⚡ tablefold expand 물리 SQL (Physical CTE Query)</div>
-          <code>${escapeHtml(data.physical_sql)}</code>
-        </div>
-
-        ${dbTableHtml}
-      `;
+      renderAnswer(aiBubble, data);
       messages.scrollTop = messages.scrollHeight;
 
     } catch (err) {
       btn.disabled = false;
-      aiBubble.innerHTML = `<div style="color: #f38ba8;">❌ 네트워크 오류: ${err.message}</div>`;
+      aiBubble.innerHTML = `<div style="color: var(--bad);">❌ ${escapeHtml(friendlyError(err.message))}</div>`;
     }
   }
 
-  function escapeHtml(str) {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  function renderAnswer(aiBubble, data) {
+    // Build DB Result Table HTML
+    let dbTableHtml = '';
+    let exec = null;
+    if (data.execution_result) {
+      exec = data.execution_result;
+      if (exec.status === 'success' && exec.columns && exec.columns.length > 0) {
+        const headerCols = exec.columns.map(c => `<th>${escapeHtml(c)}</th>`).join('');
+        let bodyRows = '';
+        if (exec.rows && exec.rows.length > 0) {
+          bodyRows = exec.rows.map(row => {
+            const cells = exec.columns.map(c => `<td>${escapeHtml(String(row[c] !== undefined && row[c] !== null ? row[c] : ''))}</td>`).join('');
+            return `<tr>${cells}</tr>`;
+          }).join('');
+        } else {
+          bodyRows = `<tr><td colspan="${exec.columns.length}" class="empty-row">조회된 데이터 행이 없습니다 (DB 쿼리 구문 정상, 데이터 0건)</td></tr>`;
+        }
+
+        dbTableHtml = `
+          <div class="db-result-box">
+            <div class="sql-box-title accent">
+              <span>📊 실제 DB 조회 결과 (${exec.row_count}건)</span>
+              <span style="display:flex; align-items:center; gap:8px;">
+                <span class="badge badge-green" style="text-transform:none;">✅ 쿼리 실행 성공</span>
+                <button type="button" class="copy-btn" data-copy="csv">복사 (CSV)</button>
+              </span>
+            </div>
+            <div style="overflow-x: auto; max-height: 250px;">
+              <table class="db-table">
+                <thead><tr>${headerCols}</tr></thead>
+                <tbody>${bodyRows}</tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      } else if (exec.status === 'error') {
+        dbTableHtml = `
+          <div class="db-result-box error">
+            <div class="sql-box-title" style="color: var(--bad);">⚠️ DB 쿼리 실행 오류</div>
+            <div class="db-error-text">${escapeHtml(exec.error)}</div>
+          </div>
+        `;
+      } else if (exec.status === 'not_connected') {
+        dbTableHtml = `
+          <div class="db-result-box">
+            <div style="color: var(--muted); font-size: 0.82rem;">
+              💡 <b>실제 DB 연동 안내:</b> 스키마 쿼리 생성이 완료되었습니다. 실제 도커 DB 데이터 조회를 원하시면 <code>.env</code> 파일의 <code>TABLEFOLD_MSSQL_*</code> 접속 정보를 채워주세요.
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    // 배지는 개발 용어 대신 무슨 일이 있었나로 말한다.
+    const firstModel = Array.isArray(data.models_used) && data.models_used.length ? data.models_used[0] : null;
+    // 조인 생략은 숫자 나열보다 문장 한 개가 낫다. 생략된 게 없으면 할 말도 없다.
+    const plainLine = firstModel && data.joins_pruned > 0
+      ? `<p class="plain-answer">'${escapeHtml(firstModel)}' 모델을 읽어 답했습니다. 미리 붙어 있던 조인 ${Number(data.joins_pruned)}개는 생략했습니다.</p>`
+      : '';
+
+    // Render Rich Result
+    aiBubble.innerHTML = `
+      ${plainLine}
+      <div class="badge-bar">
+        <span class="badge">읽은 모델: ${escapeHtml(data.routed_to || (data.models_used || []).join(', ') || '-')}</span>
+        ${data.joins_pruned > 0 ? `<span class="badge badge-green">생략된 조인 ${Number(data.joins_pruned)}개</span>` : ''}
+        <span class="badge">생성 조인: ${Number(data.joins_emitted)}개</span>
+        ${data.preparation_note ? `<span class="badge badge-warn">${escapeHtml(data.preparation_note)}</span>` : ''}
+        ${data.repairs > 0 ? `<span class="badge badge-warn">수리 횟수: ${Number(data.repairs)}회</span>` : ''}
+      </div>
+
+      <div class="sql-box">
+        <div class="sql-box-title"><span>🧠 AI가 읽은 논리 SQL</span><button type="button" class="copy-btn" data-copy="logical">복사</button></div>
+        <code>${escapeHtml(data.logical_sql)}</code>
+      </div>
+
+      <div class="sql-box good">
+        <div class="sql-box-title accent"><span>⚡ 실제 DB용 SQL</span><button type="button" class="copy-btn" data-copy="physical">복사</button></div>
+        <code>${escapeHtml(data.physical_sql)}</code>
+      </div>
+
+      ${dbTableHtml}
+    `;
+
+    // 복사할 내용은 버튼에 직접 붙인다. innerHTML 로 다시 그려도 이 함수가
+    // 방금 만든 요소들이라 속성이 살아 있다.
+    const stash = {
+      logical: data.logical_sql,
+      physical: data.physical_sql,
+      csv: exec && exec.columns ? toCsv(exec.columns, exec.rows || []) : '',
+    };
+    aiBubble.querySelectorAll('.copy-btn').forEach((btnEl) => {
+      btnEl._payload = stash[btnEl.dataset.copy] ?? '';
+    });
+  }
+
+  function toCsv(columns, rows) {
+    const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [columns.map(cell).join(',')];
+    for (const row of rows) lines.push(columns.map((c) => cell(row[c])).join(','));
+    return lines.join('\n');
+  }
+
+  // 토스트가 없는 화면이라 버튼 라벨 자체가 결과를 말하게 한다.
+  async function copyWithFeedback(btn) {
+    const text = btn._payload;
+    if (!text) return;
+    const original = btn.textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = '복사됨';
+    } catch {
+      btn.textContent = '복사 실패';
+    }
+    setTimeout(() => { btn.textContent = original; }, 1200);
   }
 </script>
 

@@ -26,6 +26,14 @@ class FoldResult:
     layer: LogicalLayer
     inferred_foreign_keys: int
 
+    merged_aliases: tuple[tuple[str, str], ...] = ()
+    """동치 통합으로 필드에서 빠진 (표, 컬럼) 짝 — 소문자.
+
+    반영도(:mod:`tablefold.report.fidelity`)가 읽는다. 별칭 컬럼은 사라진 게
+    아니라 대표 컬럼으로 되찾을 수 있는 것이므로, 이 목록을 모르면 보존율이
+    거짓으로 떨어진다. 데이터 검증 없이 이름만으로 접은 경우엔 비어 있다.
+    """
+
     @property
     def tier1_covered_tables(self) -> set[str]:
         covered: set[str] = set()

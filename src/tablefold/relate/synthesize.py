@@ -151,3 +151,177 @@ def _edges(
         )
         for table, column, grain in bearers
     )
+
+
+# ── 월별 요약 (큐브 라이트) ───────────────────────────────────────────────────
+#
+# 와이드 모델은 조인을 없애지만 행을 줄이지는 않는다. 원장 1000만 행의 월별
+# 추세를 묻는 질문도 결국 1000만 행을 훑는다. 팩트마다 **월 입도 요약 가상
+# 테이블**을 하나 세워 두면, 추세 질문은 요약을 읽고 상세 질문만 원본을 읽는
+# 식으로 갈린다. 요약은 GROUP BY 로 만드므로 행 압축이 실제로 일어난다 — 이
+# 저장소에서 몇 안 되는 진짜 정보 축소다.
+
+SUMMARY_PREFIX = "V_"
+SUMMARY_SUFFIX = "_MON"
+
+
+def add_monthly_summaries(
+    schema: PhysicalSchema,
+    *,
+    facts: tuple[str, ...] | None = None,
+    max_measures: int = 8,
+) -> tuple[PhysicalSchema, tuple[str, ...]]:
+    """팩트 표마다 월 입도 요약 가상 테이블을 붙인 스키마.
+
+    ``facts`` 를 비우면 나가는 키가 있고 참조당하지 않는 표(= 전형적 팩트)를
+    고른다. 가상 표도 후보다 — 파티션 결합으로 합쳐진 원장의 월 추세를 묻는
+    질문이 여전히 전 행을 훑는다면 압축이 반쪽이다. 요약의 골격은:
+
+    * 기간 키 — ``YYYYMMDD`` 는 앞 여섯 자리로 접고(파생키 규칙과 같은 식),
+      ``YYYYMM`` 은 그대로 둔다.
+    * 차원 키 — 이 팩트가 참조하는 외래 키 컬럼. 요약도 같은 차원에 붙어야
+      "조직별 월 매출"이 요약 모델에서 바로 답힌다.
+    * 실측값 — 숫자 컬럼의 SUM 과 줄 수 COUNT. 상한(``max_measures``)은 요약
+      모델이 또 넓어지는 것을 막는 자리다.
+
+    기간 키가 아예 없는 팩트는 건너뛴다 — 무엇으로 묶을지 모르는 요약은
+    지어내는 것이다.
+    """
+    from tablefold.relate.graph import SchemaGraph
+
+    graph = SchemaGraph.build(schema)
+    if facts is None:
+        # 후보는 "기간 키를 가진 표"다. 차수로 고르면 파티션 결합처럼 간선이
+        # 없는 가상 원장이 빠진다 — 그런 원장의 월 추세야말로 요약할 가치가
+        # 크다. 기간 앵커 자신과 이미 만든 요약은 다시 요약하지 않는다.
+        facts = tuple(
+            t.name
+            for t in schema.tables
+            if t.name != PERIOD_ANCHOR
+            and not t.name.startswith(SUMMARY_PREFIX)
+            and _month_key_of(t)[0] is not None
+            and any(c.is_numeric for c in t.columns)
+        )
+
+    taken = {t.name.lower() for t in schema.tables}
+    added_tables: list[PhysicalTable] = []
+    added_edges: list[ForeignKey] = []
+    built: list[str] = []
+
+    for fact_name in facts:
+        fact = schema.table(fact_name)
+        if fact is None:
+            continue
+
+        month_column, grain = _month_key_of(fact)
+        if month_column is None:
+            continue
+
+        fk_columns = [
+            c
+            for fk in graph.outgoing(fact.name)
+            for c in fk.from_columns
+            if c.lower() != month_column.name.lower()
+        ]
+        measures = [c.name for c in fact.columns if c.is_numeric][:max_measures]
+        # SELECT 의 식과 GROUP BY 의 식이 같아야 한다. SELECT 는 여섯 자리로
+        # 접고 GROUP BY 는 날짜 전체를 쓰면 요약이 아니라 일별 복제가 된다.
+        month_select, month_group = _month_expr(month_column.name, grain)
+
+        select_parts = [month_select, *fk_columns]
+        agg_parts = [f"SUM({m}) AS {m}" for m in measures]
+        agg_parts.append("COUNT(*) AS ROW_CNT")
+        select_parts += agg_parts
+
+        source_sql = (
+            f"SELECT {', '.join(select_parts)} FROM {fact.qualified_name} "
+            f"GROUP BY {', '.join([month_group, *fk_columns])}"
+        )
+
+        summary_name = f"{SUMMARY_PREFIX}{fact.name}{SUMMARY_SUFFIX}"
+        stem = 1
+        while summary_name.lower() in taken:
+            summary_name = f"{summary_name}_{stem}"
+            stem += 1
+        taken.add(summary_name.lower())
+
+        columns = [
+            PhysicalColumn(
+                name=MONTH_KEY,
+                type="varchar(6)",
+                comment="기준년월",
+            ),
+            *[replace(c, comment=None) for c in fact.columns if c.name in fk_columns],
+            *[
+                replace(c, comment=f"요약 합계 ({fact.name}.{c.name})")
+                for c in fact.columns
+                if c.name in measures
+            ],
+            PhysicalColumn(name="ROW_CNT", type="bigint", comment="원본 줄 수"),
+        ]
+        added_tables.append(
+            PhysicalTable(
+                name=summary_name,
+                columns=tuple(columns),
+                primary_key=(),
+                row_estimate=None,
+                comment=f"{fact.name} 의 월 입도 요약 — 추세 질문은 이쪽을 읽는다",
+                source_sql=source_sql,
+            )
+        )
+
+        # 요약이 참조하는 차원은 원 팩트와 같다. GROUP BY 에 그 키를 넣었으므로
+        # 관계가 그대로 성립한다.
+        for fk in graph.outgoing(fact.name):
+            kept = tuple(
+                c for c in fk.from_columns if c.lower() != month_column.name.lower()
+            )
+            if not kept:
+                continue
+            added_edges.append(
+                ForeignKey(
+                    from_table=summary_name,
+                    from_columns=kept,
+                    to_table=fk.to_table,
+                    to_columns=fk.to_columns,
+                    inferred=True,
+                    confidence=fk.confidence,
+                    key_expressions=fk.key_expressions,
+                    condition=fk.condition,
+                )
+            )
+        built.append(summary_name)
+
+    if not added_tables:
+        return schema, ()
+
+    return replace(
+        schema,
+        tables=(*schema.tables, *added_tables),
+        foreign_keys=(*schema.foreign_keys, *added_edges),
+    ), tuple(built)
+
+
+def _month_key_of(fact: PhysicalTable):
+    """팩트가 들고 있는 기간 키를 고른다. 월 키가 최선, 날짜 키는 접어 쓴다.
+
+    날짜 키를 거절할 이유가 없다 — 요약은 어차피 앞 여섯 자리로 묶는다. 캘린더
+    차원이 있고 없고도 무관하다: 요약의 GROUP BY 는 물리 표 안에서 끝난다.
+    """
+    best = None
+    for column in fact.columns:
+        grain = _grain(column)
+        if grain == "month":
+            return column, "month"
+        if grain == "day" and best is None:
+            best = (column, "day")
+    return best or (None, None)
+
+
+def _month_expr(column: str, grain: str) -> tuple[str, str]:
+    """`(SELECT 절 식, GROUP BY 절 식)`. 두 식은 반드시 같은 값을 묶어야 한다."""
+    if grain == "month":
+        return f"{column} AS {MONTH_KEY}", column
+    # 방언 중립. 확장기가 sqlglot 으로 대상 방언으로 다시 쓴다.
+    folded = f"SUBSTRING({column}, 1, 6)"
+    return f"{folded} AS {MONTH_KEY}", folded

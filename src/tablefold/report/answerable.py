@@ -129,11 +129,16 @@ def measure(layer: LogicalLayer, cases, graph: SchemaGraph) -> Answerability:
         best_missing = needed
         for name, available in exposed.items():
             missing = needed - available
-            if len(missing) < len(best_missing) or (
-                not missing
-                and best_model is not None
-                and len(exposed[best_model]) > len(available)
-            ) or not missing and best_model is None:
+            if (
+                len(missing) < len(best_missing)
+                or (
+                    not missing
+                    and best_model is not None
+                    and len(exposed[best_model]) > len(available)
+                )
+                or not missing
+                and best_model is None
+            ):
                 best_model, best_missing = name, missing
 
         verdicts.append(

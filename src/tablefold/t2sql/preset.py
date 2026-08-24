@@ -52,6 +52,16 @@ def split_anchors(graph: SchemaGraph) -> tuple[tuple[str, ...], tuple[str, ...]]
 
     양쪽에 다 걸리는 표(스노우플레이크의 중간 차원)는 차원으로 센다. 참조당하는
     표는 다른 표들을 한 모델에 모으는 자리이고, 그것이 앵커로서의 값어치다.
+
+    간선이 하나도 없는 표도 기본 키가 있으면 차원으로 세운다. 한때 그런 표는
+    두 목록 어디에도 걸리지 않아 앵커도 모델도 없이 조용히 사라졌고, 그 표의
+    질문만 "논리 모델을 참조하지 않는다"로 죽었다. 관계가 없다는 사실은 그 표가
+    답할 가치가 없다는 뜻이 아니다 — 오히려 아무것도 붙지 않은 좁고 단순한
+    모델이 되므로 폴드 비용도 거의 없다.
+
+    가상 표(파티션 결합 · 월별 요약)는 키가 없어도 세운다. 그것들은 원래 답을
+    받으라고 만들어진 것이라 간선이 없어도 버림 대상이 아니다. 오히려 요약
+    모델의 입도 자체가 그 존재 이유다.
     """
     dimensions: list[str] = []
     facts: list[str] = []
@@ -60,10 +70,14 @@ def split_anchors(graph: SchemaGraph) -> tuple[tuple[str, ...], tuple[str, ...]]
             dimensions.append(table.name)
         elif graph.out_degree(table.name):
             facts.append(table.name)
+        elif table.primary_key or table.is_virtual:
+            dimensions.append(table.name)
     return tuple(dimensions), tuple(facts)
 
 
-def recover_relationships(schema: PhysicalSchema) -> PhysicalSchema:
+def recover_relationships(
+    schema: PhysicalSchema, *, use_tokens: bool = True
+) -> PhysicalSchema:
     """차원의 기본 키로 관계를 복구해 붙인 스키마.
 
     웨어하우스는 외래 키를 잘 선언하지 않는다. 선언된 것만 쓰면 그래프가 조각나고,
@@ -75,14 +89,24 @@ def recover_relationships(schema: PhysicalSchema) -> PhysicalSchema:
     공유 키(``ORG_CD``)로 엮여서 실제로 없는 관계가 대량으로 생긴다 — 팩트는 서로를
     참조하지 않는다.
 
+    스노우플레이크의 중간 차원(``F → D_MID → D_TOP``)은 여기서 못 찾는다. 중간
+    차원은 나가는 키가 있어서 대상에서 빠지는데, 구조만으로는 중간 차원과 "자식을
+    두고 참조도 당하는 팩트"를 가릴 수 없기 때문이다. 데이터가 있으면
+    :func:`tablefold.relate.validate.recover_with_data` 가 위반율로 가려서 찾는다.
+
     :func:`split_anchors` 를 쓰지 않는 이유는 순환이다. 저쪽은 "참조당하는가"를
     보는데, 복구 전에는 아무도 참조하지 않는 차원이 있을 수 있다 — 그게 애초에
     복구하려는 상황이다. 그런 표는 ``in_degree`` 도 ``out_degree`` 도 0 이라
     차원으로도 팩트로도 안 잡히고 조용히 대상에서 빠진다. "나가는 키가 없다"는
     엣지가 하나도 없어도 읽히는 사실이다.
 
+    ``use_tokens`` 는 어휘소 정합을 얹는 자리다. 기본 키 정확 일치보다 느슨해서
+    ``SA_ORG_CD`` → ``D_SA_ORG.ORG_CD`` 를 찾지만, 그만큼 우연도 더 줍는다.
+    확신도를 0.6 으로 낮게 심어 두었으므로 데이터 검증 단계를 거치면 관측값으로
+    덮인다.
+
     **데이터를 읽지 않는다.** 그래서 여기서 나온 엣지는 "스키마상 가능한 관계"이지
-    관측된 관계가 아니고, ``confidence`` 는 자리표시자 0.9 로 남는다. 데이터가 있으면
+    관측된 관계가 아니고, ``confidence`` 는 자리표시자로 남는다. 데이터가 있으면
     후보마다 위반율을 재서 걸러야 한다 — ``demo/live.py`` 가 그렇게 한다. 그
     한 단계가 빠진 결과라는 것을 호출자가 알아야 하므로 이 함수는 별도로 둔다.
     ``fold_star_schema`` 가 자동으로 부르지 않는 이유가 그것이다.
@@ -95,10 +119,26 @@ def recover_relationships(schema: PhysicalSchema) -> PhysicalSchema:
     )
     if not targets:
         return schema
-    recovered = infer_from_primary_keys(schema, targets=targets)
+
+    from tablefold.relate.discover import infer_from_name_tokens
+
+    recovered = list(infer_from_primary_keys(schema, targets=targets))
+    claimed = {
+        (fk.from_table.lower(), tuple(c.lower() for c in fk.from_columns))
+        for fk in recovered
+    }
+    if use_tokens:
+        for fk in infer_from_name_tokens(schema, targets=targets):
+            # 기본 키 정확 일치가 이미 만든 엣지가 정답이다 — 어휘소 버전은
+            # 같은 쌍을 다시 내더라도 확신도가 낮으므로 먼저 온 것을 살린다.
+            mark = (fk.from_table.lower(), tuple(c.lower() for c in fk.from_columns))
+            if mark in claimed:
+                continue
+            claimed.add(mark)
+            recovered.append(fk)
     if not recovered:
         return schema
-    return schema.with_foreign_keys(schema.foreign_keys + recovered)
+    return schema.with_foreign_keys(schema.foreign_keys + tuple(recovered))
 
 
 def fold_star_schema(

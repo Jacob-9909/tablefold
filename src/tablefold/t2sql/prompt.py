@@ -135,6 +135,15 @@ def render_catalog(layer: LogicalLayer) -> str:
         lines.append(f"### {model.name}")
         lines.append(f"  한 줄 = {model.base_table} 한 행")
 
+        if is_summary_model(model):
+            # 요약 모델은 행 수가 원본의 백분의 일일 수 있다. 추세 질문이 상세
+            # 모델을 고르면 정답은 나오되 비용과 시간만 든다. 카탈로그에서
+            # 방향을 미리 제시한다 — 판단은 라우터 몫, 근거 제시는 여기 몫.
+            lines.append(
+                '  ※ 월 입도 요약. "월별 추세", "기간별 흐름" 처럼 기간이'
+                " 축이 되는 질문은 상세 모델보다 이쪽을 우선 고른다."
+            )
+
         measures = _measures_by_source(model)
         if measures:
             lines.append(f"  답할 수 있는 값: {measures}")
@@ -155,6 +164,17 @@ def render_catalog(layer: LogicalLayer) -> str:
         if conditions:
             lines.append(f"  걸 수 있는 조건: {_capped(conditions)}")
     return "\n".join(lines)
+
+
+def is_summary_model(model: LogicalModel) -> bool:
+    """월 입도 요약 모델인가. 이름은 :mod:`tablefold.relate.synthesize` 가 정한다.
+
+    설명 필드 대신 이름 규칙을 보는 이유는 단순하다 — 이 판정은 프롬프트를
+    쓰는 시점에 필요한데, 요약 합성과 레이어 작성 사이에서 설명이 유실될 수
+    있다. 합성기가 붙인 이름은 계약이다.
+    """
+    base = model.base_table
+    return base.startswith("V_") and base.endswith("_MON")
 
 
 def _measures_by_source(model: LogicalModel) -> str:

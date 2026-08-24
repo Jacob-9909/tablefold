@@ -111,13 +111,10 @@ def test_one_model_may_appear_more_than_once(retail_schema):
     """
     result = fold(retail_schema, policy=SelectionPolicy(max_areas=4))
     orders = result.layer.model("orders")
-    value = next(
-        f.name for f in orders.fields if f.type.upper().startswith("DECIMAL")
-    )
+    value = next(f.name for f in orders.fields if f.type.upper().startswith("DECIMAL"))
 
     sql = expand(
-        f"SELECT {value} FROM orders "
-        f"WHERE {value} > (SELECT AVG({value}) FROM orders)",
+        f"SELECT {value} FROM orders WHERE {value} > (SELECT AVG({value}) FROM orders)",
         result.layer,
         result.graph,
     ).sql
@@ -183,7 +180,7 @@ def test_schema_qualifier_survives_expansion():
 
 
 def test_a_filtered_child_joins_inner_not_left(filtered_fold):
-    """"7월 매출"을 물으면 7월에 매출이 없는 부모는 답에서 빠져야 한다.
+    """ "7월 매출"을 물으면 7월에 매출이 없는 부모는 답에서 빠져야 한다.
 
     LEFT 로 두면 그런 부모가 NULL 을 달고 살아남는다 — NL2SQL 실측에서 13행이
     나왔고 그중 5행이 NULL 이었다. 정답은 8행이다.
@@ -863,7 +860,7 @@ def _org_anchored():
 
 
 def test_a_childs_dimension_becomes_a_filter():
-    """"매출액 계정만 합계" 는 자식이 아니라 자식이 가리키는 차원의 이야기다.
+    """ "매출액 계정만 합계" 는 자식이 아니라 자식이 가리키는 차원의 이야기다.
 
     통로가 없으면 재무 주제의 질문이 통째로 답이 안 된다 — 골드셋 FI_0001 이
     정확히 여기서 실패했다.
@@ -871,9 +868,7 @@ def test_a_childs_dimension_becomes_a_filter():
     result = _org_anchored()
     orgs = result.layer.model("orgs")
 
-    two_step = [
-        f for f in orgs.fields if f.filter_only and len(f.source.path) == 2
-    ]
+    two_step = [f for f in orgs.fields if f.filter_only and len(f.source.path) == 2]
 
     assert any(f.source.table == "accounts" for f in two_step)
 

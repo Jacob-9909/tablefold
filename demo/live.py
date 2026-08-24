@@ -81,13 +81,28 @@ def load(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
 
 
 def _connect_db(database_name: str):
+    """접속 팩토리. 자격 증명은 환경 변수로만 받는다.
+
+    기본값으로 ``sa`` 와 비밀번호를 심어 둔 적이 있다. 편의였지만, 이 SQL 을
+    실행하는 창구가 인터넷에 열려 있는 순간 그 기본값은 데이터베이스 전체
+    권한을 익명에게 넘기는 일이었다. 값이 없으면 접속을 거절한다 — 데모가
+    죽는 것보다 남의 웨어하우스가 열리는 것이 나쁘다.
+    """
+    user = os.environ.get("TABLEFOLD_MSSQL_USER")
+    password = os.environ.get("TABLEFOLD_MSSQL_PASSWORD")
+    if not user or not password:
+        raise LiveUnavailable(
+            "TABLEFOLD_MSSQL_USER / TABLEFOLD_MSSQL_PASSWORD 가 설정되지 않아 "
+            "라이브 소스에 붙을 수 없습니다. 예제 스키마 모드를 사용하세요."
+        )
+
     def connect_fn():
         import pymssql
         return pymssql.connect(
             server=os.environ.get("TABLEFOLD_MSSQL_HOST", "localhost"),
             port=int(os.environ.get("TABLEFOLD_MSSQL_PORT", "11433")),
-            user=os.environ.get("TABLEFOLD_MSSQL_USER", "sa"),
-            password=os.environ.get("TABLEFOLD_MSSQL_PASSWORD", "Nl2Sql!Local#2026").strip("'\""),
+            user=user,
+            password=password.strip("'\""),
             database=database_name,
         )
     return connect_fn

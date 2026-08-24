@@ -38,9 +38,7 @@ def layer(retail_graph):
     clustering = cluster(
         retail_graph, profile_tables(retail_graph), policy=SelectionPolicy(max_areas=4)
     )
-    return compose(
-        retail_graph, clustering, options=ComposeOptions(field_budget=400)
-    )
+    return compose(retail_graph, clustering, options=ComposeOptions(field_budget=400))
 
 
 def test_a_case_the_layer_covers_is_answerable(layer, retail_graph):
@@ -110,7 +108,11 @@ def test_the_curve_is_monotone_in_the_budget(retail_schema):
 
 def test_every_point_respects_its_budget(retail_schema):
     cases = (FakeCase("SA_0001", {"orders": frozenset({"total"})}),)
-    for point in tune.curve(retail_schema, cases, budgets=(3_000, 9_000)):
+    # 예산은 모델 헤더 고정비보다 커야 의미가 있다. 간선 없는 참조 표
+    # (currencies · exchange_rates · audit_events)도 앵커로 세우므로 최소
+    # 레이어가 커졌다 — 그 아래 예산은 "답이 잘리는 점"이지 "잘못된 배분"이
+    # 아니다. 가능한 예산에서만 배분 규율을 본다.
+    for point in tune.curve(retail_schema, cases, budgets=(6_000, 12_000)):
         assert point.prompt_length <= point.prompt_budget
 
 

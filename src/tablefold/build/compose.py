@@ -110,28 +110,32 @@ def compose(
         for area in clustering.areas
         if graph.schema.table(area.anchor) is not None
     )
-    notes = tuple(f"uncovered: {name}" for name in clustering.unassigned)
+    notes = list(f"uncovered: {name}" for name in clustering.unassigned)
+    models = _allocate(drafts, opts, notes)
 
     # 문자 예산이면 레이어 자체 오버헤드(머리말·Tier-2 목록)를 먼저 뺀다. 그것도
     # 프롬프트에 들어가므로, 안 빼면 편입은 예산을 지켰는데 렌더 결과가 넘친다.
     budget = opts.prompt_budget
     if budget is not None:
         budget -= layer_overhead(
-            len(drafts),
+            len(models),
             clustering.covered_table_count,
             len(graph.schema.tables),
             notes,
         )
         opts = replace(opts, prompt_budget=max(budget, 0))
+        # 예산이 줄면 잘리는 필드가 달라진다. 다시 배분해 맞춘다 — 이때도
+        # 버려진 통로는 notes 로 기록된다.
+        models = _allocate(drafts, opts, notes)
 
     return LogicalLayer(
-        models=_allocate(drafts, opts),
+        models=models,
         source_table_count=len(graph.schema.tables),
         source_column_count=sum(len(t.columns) for t in graph.schema.tables),
         covered_table_count=clustering.covered_table_count,
         stop_reason=clustering.stop_reason.value,
         selector=clustering.selector,
-        notes=notes,
+        notes=tuple(notes),
     )
 
 
@@ -462,7 +466,9 @@ def _filter_fields(
 
 
 def _allocate(
-    drafts: tuple[_Draft, ...], opts: ComposeOptions
+    drafts: tuple[_Draft, ...],
+    opts: ComposeOptions,
+    notes: list[str] | None = None,
 ) -> tuple[LogicalModel, ...]:
     """레이어의 예산을 모든 모델에 한 번에 배분한다.
 
@@ -473,8 +479,19 @@ def _allocate(
     ``prompt_budget`` 이 있으면 **문자로** 센다. 필드 수는 대리 변수일 뿐이고,
     진짜 제약은 프롬프트 길이다 — 실측에서 필드 하나가 평균 50자였지만 이름과
     주석 길이에 따라 흔들린다.
+
+    ``notes`` 를 주면 이름 충돌로 버려진 필터 전용 통로를 여기 기록한다. 한때
+    조용히 사라졌고, 그 표의 "7월 …" 질문만 어디서도 답을 못 찾았다.
     """
     resolved = [_deduplicate(d.candidates) for d in drafts]
+    if notes is not None:
+        dropped = sum(1 for fields in resolved for _, f in fields)
+        expected = sum(len(d.candidates) for d in drafts)
+        lost = expected - dropped
+        if lost:
+            notes.append(
+                f"filter-only channels dropped by name collisions: {lost}"
+            )
 
     queue: list[tuple[int, int, int, LogicalField]] = []
     for index, fields in enumerate(resolved):

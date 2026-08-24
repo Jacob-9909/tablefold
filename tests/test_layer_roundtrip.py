@@ -93,9 +93,7 @@ def test_derived_keys_survive_the_round_trip():
     built = compose(graph, clustering, options=ComposeOptions(max_hops=1))
 
     again = emit.from_json(emit.to_json(built))
-    steps = [
-        s for m in again.models for f in m.fields for s in f.source.path
-    ]
+    steps = [s for m in again.models for f in m.fields for s in f.source.path]
 
     assert steps
     assert any(s.key_expressions == ("SUBSTRING(YYYYMMDD, 1, 6)",) for s in steps)

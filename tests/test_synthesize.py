@@ -98,9 +98,7 @@ def test_length_eight_codes_are_not_mistaken_for_dates():
     """``BS_ACCT_CD varchar(8)`` 은 기간이 아니다. 길이만 보면 안 된다."""
     schema = PhysicalSchema(
         tables=(
-            PhysicalTable(
-                name="F_BS", columns=(_col("BS_ACCT_CD", "varchar(8)"),)
-            ),
+            PhysicalTable(name="F_BS", columns=(_col("BS_ACCT_CD", "varchar(8)"),)),
             PhysicalTable(
                 name="D_BS_ACCT",
                 columns=(_col("BS_ACCT_CD", "varchar(8)"),),

@@ -120,9 +120,7 @@ def test_a_table_absorbed_only_as_filters_is_not_groupable(tiny_graph):
     measured = fid.measure(layer, tiny_graph)
 
     absorbed = {
-        t.lower()
-        for m in layer.models
-        for t in (m.base_table, *m.absorbed_tables)
+        t.lower() for m in layer.models for t in (m.base_table, *m.absorbed_tables)
     }
     groupable = set(measured.groupable_tables)
 
@@ -166,9 +164,7 @@ def test_a_table_trimmed_to_nothing_is_not_counted_as_covered(retail_graph):
     generous = compose(
         retail_graph, clustering, options=ComposeOptions(field_budget=10_000)
     )
-    starved = compose(
-        retail_graph, clustering, options=ComposeOptions(field_budget=30)
-    )
+    starved = compose(retail_graph, clustering, options=ComposeOptions(field_budget=30))
 
     wide = fid.measure(generous, retail_graph)
     thin = fid.measure(starved, retail_graph)

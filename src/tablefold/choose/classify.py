@@ -120,9 +120,7 @@ def _profile_one(
         (_W_OUT_DEGREE, out_signal),
     ]
     if table.row_estimate and max_log_rows:
-        terms.append(
-            (_W_SIZE, math.log10(table.row_estimate + 1) / max_log_rows)
-        )
+        terms.append((_W_SIZE, math.log10(table.row_estimate + 1) / max_log_rows))
 
     total_weight = sum(weight for weight, _ in terms)
     score = sum(weight * value for weight, value in terms) / total_weight

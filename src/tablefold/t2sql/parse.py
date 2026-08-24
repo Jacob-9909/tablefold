@@ -43,9 +43,7 @@ def extract_sql(response: str, *, dialect: str = "postgres") -> str:
         if parsed is not None:
             return parsed
 
-    raise SQLNotFound(
-        "완성 텍스트에서 파싱 가능한 SQL을 찾지 못했다: " f"{text[:200]}…"
-    )
+    raise SQLNotFound(f"완성 텍스트에서 파싱 가능한 SQL을 찾지 못했다: {text[:200]}…")
 
 
 def _candidates(text: str) -> list[str]:
