@@ -43,6 +43,8 @@ load_dotenv()
 
 Completer = Callable[[Prompt], str]
 
+# 이 이름은 계정·시점에 따라 실존하지 않을 수 있다. 호출이 404 로 돌아오면
+# :func:`_model_error` 가 TABLEFOLD_LLM_MODEL 로 바꾸라는 안내를 붙여 준다.
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_OPENAI_MODEL = "gpt-4o"
 
@@ -149,6 +151,27 @@ class ProviderUnavailable(RuntimeError):
     """호출 가능한 공급자가 없다. 키가 없거나 SDK 가 설치되지 않았다."""
 
 
+# 공급자 API 가 "그런 모델 없음"으로 답하는 패턴. 404 상태 코드와 메시지
+# 문구를 함께 본다 — SDK 마다 예외 모양이 달라서 문자열이 가장 이식성이 좋다.
+_MODEL_NOT_FOUND_MARKERS = ("404", "not_found", "does not exist", "no such model")
+
+
+def _model_error(exc: Exception, model: str) -> ProviderUnavailable | None:
+    """모델 이름 문제면 행동 지침을 담은 예외로 바꾼다. 아니면 ``None``.
+
+    ``claude-sonnet-5`` 같은 기본값은 계정·시점에 따라 실존하지 않을 수 있다.
+    원문 오류만 올리면 "SDK 가 고장 났나?" 의심하게 되지만, 실제로는 이름
+    하나 바꾸면 끝나는 일이다 — 어디를 바꿔야 하는지까지 같이 말한다.
+    """
+    text = str(exc).lower()
+    if not any(marker in text for marker in _MODEL_NOT_FOUND_MARKERS):
+        return None
+    return ProviderUnavailable(
+        f"모델 '{model}' 을(를) 찾을 수 없습니다. "
+        "TABLEFOLD_LLM_MODEL 환경 변수로 사용 가능한 모델을 지정하세요."
+    )
+
+
 class _Recording:
     """마지막 호출의 사용량을 들고 있는 completer 의 공통 부분."""
 
@@ -169,9 +192,17 @@ class AnthropicCompleter(_Recording):
         self._max_tokens = max_tokens
 
     def __call__(self, prompt: Prompt) -> str:
-        message = self._client.messages.create(
-            **anthropic_kwargs(prompt, model=self._model, max_tokens=self._max_tokens)
-        )
+        try:
+            message = self._client.messages.create(
+                **anthropic_kwargs(
+                    prompt, model=self._model, max_tokens=self._max_tokens
+                )
+            )
+        except Exception as exc:
+            handled = _model_error(exc, self._model)
+            if handled is not None:
+                raise handled from exc
+            raise
         usage = message.usage
         self._last = Usage(
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
@@ -191,9 +222,15 @@ class OpenAICompleter(_Recording):
         self._max_tokens = max_tokens
 
     def __call__(self, prompt: Prompt) -> str:
-        response = self._client.chat.completions.create(
-            **openai_kwargs(prompt, model=self._model, max_tokens=self._max_tokens)
-        )
+        try:
+            response = self._client.chat.completions.create(
+                **openai_kwargs(prompt, model=self._model, max_tokens=self._max_tokens)
+            )
+        except Exception as exc:
+            handled = _model_error(exc, self._model)
+            if handled is not None:
+                raise handled from exc
+            raise
         usage = response.usage
         cached = 0
         details = getattr(usage, "prompt_tokens_details", None)

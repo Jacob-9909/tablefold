@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from tablefold.ir import ForeignKey, PhysicalColumn, PhysicalSchema, PhysicalTable
 from tablefold.relate.validate import (
+    DEFAULT_MAX_SCAN_ROWS,
     quoted,
     recover_with_data,
     unique_single_keys,
@@ -144,10 +145,12 @@ def test_a_unique_subset_of_a_composite_key_is_found():
         primary_key=("ITEM_GROUP_CD", "ITEM_CD"),
     )
     schema = PhysicalSchema(tables=(item,))
-    # ITEM_GROUP_CD 는 중복(100행 중 5종), ITEM_CD 는 유일.
-    cursor = FakeCursor([(100, 5), (100, 100)])
+    # 표당 질의 한 번: COUNT(*) 100, ITEM_GROUP_CD 5종(중복), ITEM_CD 100종(유일).
+    cursor = FakeCursor([(100, 5, 100)])
 
     assert unique_single_keys(schema, cursor) == {"D_ITEM": ("ITEM_CD",)}
+    # 배분 전에 쿼리 수가 묶였는지도 확인한다 — 컬럼별로 날리던 옛 방식의 회귀 방지.
+    assert len(cursor.queries) == 1
 
 
 def test_a_single_column_key_needs_no_probe():
@@ -230,3 +233,39 @@ def test_recovery_returns_the_schema_untouched_when_nothing_survives():
 
     assert recovered == ()
     assert recovered_schema is schema
+
+
+def test_a_huge_table_is_skipped_by_the_row_cap():
+    """``COUNT(DISTINCT)`` 는 큰 표에서 풀스캔이다. 상한 위 표는 건너뛴다."""
+    huge = PhysicalTable(
+        name="D_BIG",
+        columns=(
+            PhysicalColumn("GROUP_CD", "varchar"),
+            PhysicalColumn("BIG_CD", "varchar"),
+        ),
+        primary_key=("GROUP_CD", "BIG_CD"),
+        row_estimate=DEFAULT_MAX_SCAN_ROWS + 1,
+    )
+    cursor = FakeCursor([])
+
+    found = unique_single_keys(PhysicalSchema(tables=(huge,)), cursor)
+
+    assert found == {}
+    assert cursor.queries == []  # 질의조차 날리지 않는다
+
+
+def test_a_table_without_an_estimate_is_still_probed():
+    """추정치가 없다고 못 재는 것은 아니다 — 검사해서 알아낸다."""
+    item = PhysicalTable(
+        name="D_ITEM",
+        columns=(
+            PhysicalColumn("ITEM_GROUP_CD", "varchar"),
+            PhysicalColumn("ITEM_CD", "varchar"),
+        ),
+        primary_key=("ITEM_GROUP_CD", "ITEM_CD"),
+    )
+    cursor = FakeCursor([(100, 5, 100)])
+
+    assert unique_single_keys(PhysicalSchema(tables=(item,)), cursor) == {
+        "D_ITEM": ("ITEM_CD",)
+    }

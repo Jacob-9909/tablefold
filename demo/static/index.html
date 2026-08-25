@@ -185,6 +185,8 @@
         </div>
         <p class="try-stat" id="expandStat" hidden></p>
         <pre id="expandedSql" class="code">바꿔보기를 누르면 여기에 결과가 나옵니다.</pre>
+        <!-- 확장 경고. 오류가 아니라 주의이므로 결과 SQL 아래에 작게 나열한다. -->
+        <div id="expandWarnings" hidden></div>
       </div>
     </div>
   </section>
@@ -380,7 +382,9 @@
   </div>
 </div>
 
-<div id="toast" class="toast" hidden></div>
+<!-- 화면 한구석에 잠깐 뜨는 알림. 눈으로 보는 사람에게는 사라져도, 스크린리더는
+     live region 의 내용이 바뀌는 것을 읽어 주므로 소리로만 쓰는 사람에게도 닿는다. -->
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
 <script src="chart.js"></script>
 <script src="app.js"></script>

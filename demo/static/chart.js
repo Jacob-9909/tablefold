@@ -81,7 +81,15 @@
 
   /** 상자 하나를 그린다. 각 줄의 y 좌표를 돌려줘야 선을 붙일 수 있다. */
   function drawBox(svg, box, onPick) {
-    const g = el("g", { class: "erd-box", "data-table": box.table });
+    const g = el("g", {
+      class: "erd-box",
+      "data-table": box.table,
+      // 마우스 없이도 상자를 고를 수 있어야 한다. 탭으로 초점을 받고
+      // Enter·스페이스로 누른다 — 클릭으로만 고를 수 있던 것의 최소 수정.
+      tabindex: "0",
+      role: "button",
+      "aria-label": `${box.table} 표 선택`,
+    });
 
     const height = boxHeight(box.rows.length);
     const tone =
@@ -156,7 +164,15 @@
       g.appendChild(more);
     }
 
-    g.addEventListener("click", () => onPick(box.table));
+    // 클릭과 키보드가 같은 동작으로 모인다. 두 갈래가 따로 놀면 나중에
+    // 한쪽만 고쳐지는 결함이 생긴다.
+    const pick = () => onPick(box.table);
+    g.addEventListener("click", pick);
+    g.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      pick();
+    });
     svg.appendChild(g);
     box.height = height;
   }
@@ -198,6 +214,106 @@
     const key = box.rows.slice(0, MAX_ROWS).find((r) => r.key) || box.rows[0];
     const y = key && key.cy ? key.cy : box.y + HEAD_H + ROW_H / 2;
     return { x: side === "left" ? box.x : box.x + BOX_W, y };
+  }
+
+  // ── ERD 확대·이동 ────────────────────────────────────────────────────────
+  //
+  // 큰 모델은 그림이 화면보다 넓다. 스크롤바로 읽던 때는 지금 어디쯤 보고 있나가
+  // 감각에 잡히지 않았다. viewBox 를 바꾸는 방식은 그림을 다시 그리지 않고
+  // 보는 창만 옮기는 것이므로 좌표 계산이 이 함수 한 곳에 모인다.
+  //
+  // 리스너는 전부 svg 에 건다. 탭을 옮길 때마다 svg 는 통째로 다시 만들어지므로,
+  // 오래된 그림의 리스너가 남아 옛 좌표를 움직이는 일이 없다.
+  const ZOOM_MIN = 0.5;    // 자연 크기의 절반까지 축소(배율 하한)
+  const ZOOM_MAX = 3;      // 3 배까지 확대
+  const WHEEL_STEP = 1.1;  // 휠 한 칸의 배율
+  const CLICK_SLOP_PX = 4; // 이보다 적게 움직였으면 누름, 넘으면 이동
+
+  function enableErdNavigation(svg, naturalW, naturalH) {
+    let view = { x: 0, y: 0, w: naturalW, h: naturalH };
+    const apply = () =>
+      svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.w} ${view.h}`);
+    apply();
+
+    const reset = () => {
+      view = { x: 0, y: 0, w: naturalW, h: naturalH };
+      apply();
+    };
+
+    svg.addEventListener(
+      "wheel",
+      (e) => {
+        e.preventDefault();
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        // 커서 자리를 기준으로 창을 줄이고 늘린다. 가운데 기준이면 커서가
+        // 가리키던 곳이 손에서 벗어난다.
+        const cx = view.x + ((e.clientX - rect.left) / rect.width) * view.w;
+        const cy = view.y + ((e.clientY - rect.top) / rect.height) * view.h;
+        const factor = e.deltaY > 0 ? WHEEL_STEP : 1 / WHEEL_STEP;
+        const width = Math.min(
+          naturalW / ZOOM_MIN,
+          Math.max(naturalW / ZOOM_MAX, view.w * factor)
+        );
+        const k = width / view.w;
+        view.x = cx - (cx - view.x) * k;
+        view.y = cy - (cy - view.y) * k;
+        view.w *= k;
+        view.h *= k;
+        apply();
+      },
+      { passive: false }
+    );
+
+    // 드래그 이동. 포인터를 캡처해 커서가 그림 밖으로 나가도 잡고 있는다.
+    let drag = null;
+    let moved = 0;
+
+    svg.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      drag = { px: e.clientX, py: e.clientY, vx: view.x, vy: view.y };
+      moved = 0;
+      svg.classList.add("is-panning");
+      svg.setPointerCapture(e.pointerId);
+    });
+
+    svg.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.px;
+      const dy = e.clientY - drag.py;
+      moved = Math.max(moved, Math.hypot(dx, dy));
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      view.x = drag.vx - (dx / rect.width) * view.w;
+      view.y = drag.vy - (dy / rect.height) * view.h;
+      apply();
+    });
+
+    const release = (e) => {
+      if (!drag) return;
+      drag = null;
+      svg.classList.remove("is-panning");
+      if (svg.hasPointerCapture && svg.hasPointerCapture(e.pointerId)) {
+        svg.releasePointerCapture(e.pointerId);
+      }
+    };
+    svg.addEventListener("pointerup", release);
+    svg.addEventListener("pointercancel", release);
+
+    // 문턱을 넘은 손놀림은 선택이 아니라 이동이다. 상자의 click 핸들러보다
+    // 먼저(capture) 끊지 않으면 드래그를 마친 자리의 상자가 몰려 선택된다.
+    svg.addEventListener(
+      "click",
+      (e) => {
+        if (moved >= CLICK_SLOP_PX) {
+          e.stopPropagation();
+          e.preventDefault();
+        }
+      },
+      true
+    );
+
+    svg.addEventListener("dblclick", reset);
   }
 
   function drawErd(container, model, detailContainer) {
@@ -274,7 +390,16 @@
     void anchorLeft;
     void anchorRight;
 
+    enableErdNavigation(svg, canvasW, canvasH);
+
     container.appendChild(svg);
+
+    // 휠·드래그·더블클릭은 눈에 보이지 않는 동작이다. 화면에 적어 둔다.
+    const hint = document.createElement("p");
+    hint.className = "erd-hint";
+    hint.textContent = "휠로 확대 · 드래그로 이동 · 두 번 클릭으로 원래대로";
+    container.appendChild(hint);
+
     renderLineageDetail(detailContainer, model, anchorBox.table);
   }
 

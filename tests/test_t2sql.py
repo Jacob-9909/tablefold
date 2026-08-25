@@ -669,3 +669,22 @@ def test_newer_openai_models_ask_for_max_completion_tokens():
     assert legacy["max_tokens"] == 2048
     assert "max_completion_tokens" not in legacy
     assert prefixed["max_tokens"] == 2048
+
+
+def test_an_unknown_model_error_carries_the_override_hint():
+    """404 가 원문으로 올라가면 SDK 고장처럼 읽힌다. 행동 지침을 붙인다."""
+
+    from tablefold.t2sql.provider import ProviderUnavailable, _model_error
+
+    original = Exception("Error code: 404 - model claude-sonnet-5 does not exist")
+    handled = _model_error(original, "claude-sonnet-5")
+
+    assert isinstance(handled, ProviderUnavailable)
+    assert "TABLEFOLD_LLM_MODEL" in str(handled)
+
+
+def test_other_errors_pass_through_untouched():
+    """키 만료·네트워크 오류까지 모델 문제로 뭉개면 디버깅이 끝난다."""
+    from tablefold.t2sql.provider import _model_error
+
+    assert _model_error(Exception("invalid api key"), "gpt-4o") is None

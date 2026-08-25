@@ -609,12 +609,16 @@ def run_expand(req: ExpandRequest) -> dict[str, Any]:
             dialect=dialect_for_live(req.dialect),
         )
 
+        # 경고는 오류가 아니다. 구조적으로 옳지만 값의 범위가 다른 등 주의할
+        # 상황이라 화면이 읽는 사람에게 전해야 한다 — 숨기면 경고 없는 치우친
+        # 답을 그대로 믹는다.
         return {
             "expanded_sql": expansion.sql,
             "fields_used": list(expansion.fields_used),
             "joins_emitted": expansion.joins_emitted,
             "joins_available": expansion.joins_available,
             "joins_pruned": expansion.joins_pruned,
+            "warnings": list(expansion.warnings),
         }
     except ExpansionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -829,6 +833,22 @@ def run_chat(req: ChatRequest) -> dict[str, Any]:
         gen_res = engine.generate(req.question)
         exec_res = live.execute_query(gen_res.physical_sql)
 
+        # ``GenerationResult`` 는 확장 경고를 실어 보내지 않는다 — 엔진이 최종
+        # 확장을 버리고 필드만 남긴다. 논리 SQL 을 같은 레이어·방언으로 다시
+        # 확장하면 같은 경고가 결정적으로 나오므로 여기서 한 번 더 돌려 화면까지
+        # 전한다. 경고 사례(자식 집계 간 키 불일치)는 실행해도 에러가 없어
+        # 조용히 지나가기 때문이다.
+        try:
+            re_expanded = expand(
+                gen_res.logical_sql,
+                prep.result.layer,
+                prep.result.graph,
+                dialect=_resolve_chat_dialect(req.source, req.dialect),
+            )
+            expansion_warnings = list(re_expanded.warnings)
+        except ExpansionError:
+            expansion_warnings = []
+
         return {
             "question": gen_res.question,
             "logical_sql": gen_res.logical_sql,
@@ -843,6 +863,7 @@ def run_chat(req: ChatRequest) -> dict[str, Any]:
             "preparation_note": prep.note,
             "routed_to": gen_res.routed_to,
             "rerouted_from": gen_res.rerouted_from,
+            "warnings": expansion_warnings,
             "source_kind": req.source,
             "execution_result": exec_res,
         }

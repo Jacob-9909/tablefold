@@ -395,10 +395,25 @@ async function runExpand() {
       data.joins_pruned > 0
         ? `필요한 연결 ${data.joins_emitted}개만 만들었습니다. ${data.joins_pruned}개는 이 질문에 필요 없어 생략했습니다.`
         : `필요한 연결 ${data.joins_emitted}개를 만들었습니다.`;
+    renderExpandWarnings(data.warnings);
   } catch (err) {
     $("expandedSql").textContent = err.message;
     $("expandStat").hidden = true;
+    renderExpandWarnings([]);
   }
+}
+
+/** 확장 경고. 오류가 아니라 주의이므로 결과 SQL 아래에 작게 나열한다.
+ *  값의 범위가 섞인 답은 실행해도 에러가 나지 않아, 여기서 말해 주지 않으면
+ *  읽는 사람은 치우친 숫자를 그대로 믿는다. */
+function renderExpandWarnings(warnings) {
+  const box = $("expandWarnings");
+  if (!box) return;
+  const list = Array.isArray(warnings) ? warnings : [];
+  box.hidden = list.length === 0;
+  box.innerHTML = list
+    .map((w) => `<div class="expand-warning">⚠ ${esc(w)}</div>`)
+    .join("");
 }
 
 async function copySql() {
@@ -720,7 +735,12 @@ function renderAdvanced(data) {
 
 // ── 모델 상세 ─────────────────────────────────────────────────────────────────
 
+let sheetReturnFocus = null;
+
 function openSheet(model) {
+  // 닫은 뒤 어디로 돌아갈지 미리 기억해 둔다. 초점이 시트 안에 갇히지 않으면,
+  // 키보드만 쓰는 사람은 닫은 후 자기가 어디쯤 왔는지 잃어버린다.
+  sheetReturnFocus = document.activeElement;
   $("sheetName").textContent = model.name;
   $("sheetDesc").textContent = `${model.base_table} 1건이 한 줄입니다. ${
     model.absorbed_tables.length
@@ -755,10 +775,18 @@ function openSheet(model) {
     .join("");
 
   $("sheet").hidden = false;
+  // 초점을 시트 안으로 옮긴다. 열렸다는 것을 스크린리더와 키보드가 알아야
+  // Esc 나 닫기 버튼이 다음 동작이 된다.
+  $("sheetClose").focus();
 }
 
 function closeSheet() {
+  const wasOpen = !$("sheet").hidden;
   $("sheet").hidden = true;
+  if (wasOpen && sheetReturnFocus && document.contains(sheetReturnFocus)) {
+    sheetReturnFocus.focus();
+  }
+  sheetReturnFocus = null;
 }
 
 function sourceOf(f) {

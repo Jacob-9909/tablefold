@@ -145,6 +145,13 @@
       margin-top: 10px;
       position: relative;
     }
+    /* 확장 경고. 오류가 아니라 주의이므로 나쁨 색이 아니라 경고 색으로,
+       SQL 상자 위에 작게 한 줄씩 띄운다. */
+    .chat-warning {
+      font-size: 0.8rem;
+      color: var(--warn);
+      margin-top: 10px;
+    }
     .sql-box-title {
       font-size: 0.75rem;
       text-transform: uppercase;
@@ -228,18 +235,14 @@
       padding-bottom: 10px;
       margin-bottom: 10px;
     }
-    .chip {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      color: var(--muted);
+    /* 예시 질문 칩은 대시보드와 같은 .chip-btn 을 쓴다. 버튼이므로 탭으로
+       누를 수 있고 스크린리더가 "버튼"이라고 읽는다 — div+onclick 은 둘 다
+       못 한다. */
+    .preset-chips .chip-btn {
       padding: 6px 14px;
-      border-radius: 20px;
       font-size: 0.82rem;
-      cursor: pointer;
       white-space: nowrap;
-      transition: color 0.12s, border-color 0.12s;
     }
-    .chip:hover { border-color: var(--accent); color: var(--accent); }
     .input-wrapper { display: flex; gap: 10px; }
     .input-wrapper input {
       flex: 1;
@@ -323,10 +326,10 @@
 
     <div class="chat-input-area">
       <div class="preset-chips">
-        <button type="button" class="chip" onclick="askQuestion('선택월말 기준 거래처별 매출액과 수금액 알려줘')">💡 거래처별 매출/수금액</button>
-        <button type="button" class="chip" onclick="askQuestion('선택년도 1월~12월 직책별 인건비 추이정보 조회')">💡 직책별 인건비 추이</button>
-        <button type="button" class="chip" onclick="askQuestion('사업장별 매출 실적 및 목표 달성률 조회')">💡 영업조직 달성률</button>
-        <button type="button" class="chip" onclick="askQuestion('두 달 전 기준 제품별 기초재고금액과 기말재고금액 조회')">💡 제품별 재고자산 현황</button>
+        <button type="button" class="chip-btn" onclick="askQuestion('선택월말 기준 거래처별 매출액과 수금액 알려줘')">💡 거래처별 매출/수금액</button>
+        <button type="button" class="chip-btn" onclick="askQuestion('선택년도 1월~12월 직책별 인건비 추이정보 조회')">💡 직책별 인건비 추이</button>
+        <button type="button" class="chip-btn" onclick="askQuestion('사업장별 매출 실적 및 목표 달성률 조회')">💡 영업조직 달성률</button>
+        <button type="button" class="chip-btn" onclick="askQuestion('두 달 전 기준 제품별 기초재고금액과 기말재고금액 조회')">💡 제품별 재고자산 현황</button>
       </div>
       <form class="input-wrapper" id="chatForm" onsubmit="handleSend(event)">
         <input type="text" id="userInput" placeholder="질문을 입력하세요... (예: 선택월말 기준 거래처별 매출액과 수금액 알려줘)" required autocomplete="off">
@@ -452,12 +455,26 @@
     // Add AI Loading Bubble
     const aiBubble = document.createElement('div');
     aiBubble.className = 'chat-bubble ai-bubble';
-    aiBubble.innerHTML = '<div style="color: var(--accent);">⚡ LLM 논리 SQL 생성, tablefold 확장 및 DB 조회 실행 중...</div>';
+    // 기다림의 길이를 보여 준다. 멈춘 것인지 돌고 있는 것인지 구분이 없으면
+    // 읽는 사람은 두 번 누르거나 창을 닫는다.
+    aiBubble.innerHTML = '<div style="color: var(--accent);">답을 만들고 있습니다… 0초</div>';
+    const loadingLine = aiBubble.querySelector('div');
     messages.appendChild(aiBubble);
     messages.scrollTop = messages.scrollHeight;
 
     const btn = $('sendBtn');
     btn.disabled = true;
+
+    let elapsed = 0;
+    const ticker = setInterval(() => {
+      elapsed += 1;
+      loadingLine.textContent = `답을 만들고 있습니다… ${elapsed}초`;
+    }, 1000);
+
+    // LLM 이 늦으면 영원히 늦다. 120 초에서 끊고 이유를 말한다 — 무한 대기는
+    // 고장과 구별되지 않는다.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
 
     try {
       const res = await fetch('/api/chat', {
@@ -467,11 +484,11 @@
           question: question,
           source: source,
           dialect: dialect
-        })
+        }),
+        signal: controller.signal
       });
 
       const data = await res.json();
-      btn.disabled = false;
 
       if (!res.ok) {
         aiBubble.innerHTML = `<div style="color: var(--bad);">❌ ${escapeHtml(friendlyError(data.detail || 'SQL 생성 실패'))}</div>`;
@@ -482,8 +499,13 @@
       messages.scrollTop = messages.scrollHeight;
 
     } catch (err) {
+      // 중단(타임아웃)은 브라우저마다 메시지가 달라 이름으로 가린다.
+      const raw = err.name === 'AbortError' ? '서버 응답이 지연됩니다...' : err.message;
+      aiBubble.innerHTML = `<div style="color: var(--bad);">❌ ${escapeHtml(friendlyError(raw))}</div>`;
+    } finally {
+      clearInterval(ticker);
+      clearTimeout(timeoutId);
       btn.disabled = false;
-      aiBubble.innerHTML = `<div style="color: var(--bad);">❌ ${escapeHtml(friendlyError(err.message))}</div>`;
     }
   }
 
@@ -547,9 +569,16 @@
       ? `<p class="plain-answer">'${escapeHtml(firstModel)}' 모델을 읽어 답했습니다. 미리 붙어 있던 조인 ${Number(data.joins_pruned)}개는 생략했습니다.</p>`
       : '';
 
+    // 확장 경고는 오류가 아니다. 구조적으로 옳은 SQL 이지만 값의 범위가 다른
+    // 등 주의할 상황이므로, SQL 을 읽기 전에 위에서 먼저 보여 준다.
+    const warnHtml = (Array.isArray(data.warnings) ? data.warnings : [])
+      .map((w) => `<div class="chat-warning">⚠ ${escapeHtml(w)}</div>`)
+      .join('');
+
     // Render Rich Result
     aiBubble.innerHTML = `
       ${plainLine}
+      ${warnHtml}
       <div class="badge-bar">
         <span class="badge">읽은 모델: ${escapeHtml(data.routed_to || (data.models_used || []).join(', ') || '-')}</span>
         ${data.joins_pruned > 0 ? `<span class="badge badge-green">생략된 조인 ${Number(data.joins_pruned)}개</span>` : ''}

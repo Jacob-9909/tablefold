@@ -59,8 +59,19 @@ def quoted(name: str, dialect: str) -> str:
     return exp.to_identifier(name, quoted=True).sql(dialect=dialect)
 
 
+# 복합 기본 키 유일성 검사를 건너뛸 행 수. ``COUNT(DISTINCT …)`` 는 인덱스가
+# 있어도 큰 표에서 풀스캔이다 — 폴드 한 번에 수십 개 표를 검사하니 상한 없이는
+# 웨어하우스에서 질의 시간이 지배된다. 추정치가 이 값을 넘으면 그 표는 건너뛰고
+# 부분 키 복구 대상에서 빠진다 (덜 복구하는 것이 몇 분 걸리는 폴드보다 낫다).
+DEFAULT_MAX_SCAN_ROWS = 50_000_000
+
+
 def unique_single_keys(
-    schema: PhysicalSchema, cursor: Cursor, *, dialect: str = "tsql"
+    schema: PhysicalSchema,
+    cursor: Cursor,
+    *,
+    dialect: str = "tsql",
+    max_rows: int | None = DEFAULT_MAX_SCAN_ROWS,
 ) -> dict[str, tuple[str, ...]]:
     """복합 기본 키 중 **한 컬럼만으로도 행이 유일한** 것을 찾는다.
 
@@ -68,20 +79,39 @@ def unique_single_keys(
     ``(ITEM_GROUP_CD, ITEM_CD)``), 팩트는 말단 코드만 들고 있어서 전체 키가 맞지
     않는다. 그 부분 키로도 유일하면 참조 대상이 될 수 있다 — 유일성은 데이터로만
     확인되므로 여기서 센다.
+
+    비용은 두 가지로 묶는다. 한 표의 모든 PK 컬럼을 **질의 한 번**에 센다 —
+    ``COUNT(*)`` 도 같이 나오므로 컬럼마다 따로 세던 것과 결과가 같다. 행 수
+    추정이 ``max_rows`` 를 넘는 표는 아예 건너뛴다.
     """
     found: dict[str, tuple[str, ...]] = {}
     for table in schema.tables:
         if len(table.primary_key) < 2:
             continue
-        for column in table.primary_key:
-            if _is_load_metadata(column):
-                continue
-            cursor.execute(
-                f"SELECT COUNT(*), COUNT(DISTINCT {quoted(column, dialect)}) "
-                f"FROM {_table_ref(table.schema, table.name, dialect)}"
-            )
-            row = cursor.fetchone()
-            if row and len(row) > 1 and row[0] and row[0] == row[1]:
+        candidates = [
+            column for column in table.primary_key if not _is_load_metadata(column)
+        ]
+        if not candidates:
+            continue
+        if (
+            max_rows is not None
+            and table.row_estimate is not None
+            and table.row_estimate > max_rows
+        ):
+            continue
+
+        exprs = ", ".join(f"COUNT(DISTINCT {quoted(c, dialect)})" for c in candidates)
+        cursor.execute(
+            f"SELECT COUNT(*), {exprs} "
+            f"FROM {_table_ref(table.schema, table.name, dialect)}"
+        )
+        row = cursor.fetchone()
+        if not row or len(row) < 1 + len(candidates):
+            continue
+        total = row[0]
+        for i, column in enumerate(candidates, start=1):
+            distinct = row[i] if row[i] is not None else 0
+            if total and total == distinct:
                 found[table.name] = (column,)
                 break
     return found
