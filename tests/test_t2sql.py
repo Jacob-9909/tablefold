@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
+from tablefold.ir import (
+    ForeignKey,
+    LogicalLayer,
+    PhysicalColumn,
+    PhysicalSchema,
+    PhysicalTable,
+)
 from tablefold.read.ddl import DDLIntrospector
+from tablefold.relate.graph import SchemaGraph
 from tablefold.t2sql import (
     Example,
     GenerationError,
@@ -688,3 +696,75 @@ def test_other_errors_pass_through_untouched():
     from tablefold.t2sql.provider import _model_error
 
     assert _model_error(Exception("invalid api key"), "gpt-4o") is None
+
+
+def test_a_graph_turns_join_tables_into_compact_catalog_lines():
+    """부모 둘을 참조하는 조합 표가 카탈로그를 수천 자 불리는 일이 없다.
+
+    Mastodon 116표 실측: 카탈로그의 32% 가 조합 표 상세였다. 내용을 지우면
+    관계 질문을 못 고르므로, 지우는 대신 관계 한 줄로 압축한다.
+    """
+
+    orders = PhysicalTable(
+        name="orders",
+        columns=(PhysicalColumn("order_id", "bigint", nullable=False),),
+        primary_key=("order_id",),
+    )
+    customers = PhysicalTable(
+        name="customers",
+        columns=(PhysicalColumn("customer_id", "bigint", nullable=False),),
+        primary_key=("customer_id",),
+    )
+    links = PhysicalTable(
+        name="order_customer_links",
+        columns=(
+            PhysicalColumn("link_id", "bigint", nullable=False),
+            PhysicalColumn("order_id", "bigint"),
+            PhysicalColumn("customer_id", "bigint"),
+        ),
+        primary_key=("link_id",),
+    )
+    schema = PhysicalSchema(
+        tables=(orders, customers, links),
+        foreign_keys=(
+            ForeignKey("order_customer_links", ("order_id",), "orders", ("order_id",)),
+            ForeignKey(
+                "order_customer_links",
+                ("customer_id",),
+                "customers",
+                ("customer_id",),
+            ),
+        ),
+    )
+    from tablefold.t2sql.preset import fold_star_schema
+
+    result = fold_star_schema(schema)
+    graph = SchemaGraph.build(result.schema)
+    # 조합 표 앵커가 실제로 살아남았는지 전제 확인 — 없으면 이 테스트는 공허하다.
+    assert any(m.base_table == "order_customer_links" for m in result.layer.models)
+
+    with_graph = str(build_router_prompt("주문 고객 목록", result.layer, graph=graph))
+    without = str(build_router_prompt("주문 고객 목록", result.layer))
+
+    assert "조합 표" in with_graph
+    # 조합 표는 상세 블록 대신 관계 한 줄로 내려간다.
+    compact_line = next(
+        ln for ln in with_graph.splitlines() if "order_customer_links =" in ln
+    )
+    assert {"orders", "customers"} <= set(
+        compact_line.split("= ")[1].split(" 조합")[0].split(" × ")
+    )
+    assert compact_line.endswith("조합")
+    link_block = with_graph.split("### order_customer_links", 1)[1]
+    assert "한 줄 =" not in link_block.split("\n\n", 1)[0]
+    # graph 미전달 시 상세 블록 그대로다 (호출자 호환).
+    assert "### order_customer_links" in without
+    assert "조합 표" not in without
+
+
+def test_without_a_graph_the_catalog_keeps_its_old_shape():
+    """graph 가 없으면 기존 형태다 — 호출자 호환이 깨지면 안 된다."""
+    layer = LogicalLayer(models=(), source_table_count=0, source_column_count=0)
+    prompt = build_router_prompt("질문", layer)
+
+    assert "조합 표" not in str(prompt)

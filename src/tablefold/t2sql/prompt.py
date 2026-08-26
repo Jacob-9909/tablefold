@@ -117,7 +117,11 @@ _ROUTER_RULES = """\
 CATALOG_FIELD_SAMPLE = 12
 
 
-def render_catalog(layer: LogicalLayer) -> str:
+def render_catalog(
+    layer: LogicalLayer,
+    *,
+    compact_relations: dict[str, str] | None = None,
+) -> str:
     """모델을 고르기 위한 최소 정보. 필드를 전부 늘어놓지 않는다.
 
     고르는 데 필요한 것은 **입도와 무엇을 답할 수 있나**다. 필드 목록 전체는 고른
@@ -125,12 +129,30 @@ def render_catalog(layer: LogicalLayer) -> str:
 
     측정값을 **원천 표별로 묶어 맨 앞에** 놓는다. 모델 이름만으로는 못 고른다 —
     ``D_SA_ORG`` 와 ``D_FI_ORG`` 는 둘 다 조직 차원이고, 이름은 어느 쪽이 매출을
-    담는지 말해 주지 않는다. 실측에서 라우터가 "매출" 질문에 ``D_FI_ORG``(손익)를
+    담는지 말해 주지 않았다. 실측에서 라우터가 "매출" 질문에 ``D_FI_ORG``(손익)를
     골랐고, ``D_WORKSHOP``(작업장)을 고른 적도 있다. ``F_SALES(SALES_AMT)`` 처럼
     원천 표를 붙이면 질문의 낱말과 바로 이어진다.
+
+    ``compact_relations`` ({모델 이름 → 관계 설명}) 에 들어간 모델은 한 줄 요약
+    으로 내려간다. OLTP 스키마의 조합 표(두 부모를 잇는 연결표)는 수십 개인데
+    각자 상세 블록을 차지하면 카탈로그가 수천 자 불어난다 — Mastodon 116표
+    실측에서 32% 가 이것들이었다. 내용을 지우면 관계 질문을 못 고르므로, 지우는
+    대신 **관계 한 줄** 로 압축한다. 관계 문자열은 FK 그래프가 알려주는 것이고
+    레이어만으로는 복원되지 않는다 — 그래서 호출자가 넘기는 값이다. ``None`` 이면
+    기존 형태 그대로다.
     """
+    compact = (
+        {n.lower() for n in compact_relations}
+        if compact_relations is not None
+        else frozenset()
+    )
+    relations = {k.lower(): v for k, v in (compact_relations or {}).items()}
+    full_models = [m for m in layer.models if m.name.lower() not in compact]
+    joined_models = [m for m in layer.models if m.name.lower() in compact]
+
     lines = [f"=== 모델 {len(layer.models)}개 ==="]
-    for model in layer.models:
+
+    def render_full(model: LogicalModel) -> None:
         lines.append("")
         lines.append(f"### {model.name}")
         lines.append(f"  한 줄 = {model.base_table} 한 행")
@@ -163,6 +185,24 @@ def render_catalog(layer: LogicalLayer) -> str:
         conditions = [f.name for f in model.fields if f.filter_only]
         if conditions:
             lines.append(f"  걸 수 있는 조건: {_capped(conditions)}")
+
+    def render_compact(model: LogicalModel) -> None:
+        relation = relations.get(model.name.lower(), model.base_table)
+        lines.append(f"  {model.name} = {relation} 조합")
+
+    for model in full_models:
+        render_full(model)
+
+    if joined_models:
+        lines.append("")
+        lines.append(
+            f"=== 조합 표 {len(joined_models)}개 "
+            "(두 대상의 관계를 세거나 나열하는 표 — 관계 질문은 여기서 고른다) ==="
+        )
+        for model in joined_models:
+            lines.append("")
+            lines.append(f"### {model.name}")
+            render_compact(model)
     return "\n".join(lines)
 
 
@@ -216,15 +256,34 @@ def _capped(names: list[str]) -> str:
     return f"{shown} 외 {extra}개" if extra > 0 else shown
 
 
-def build_router_prompt(question: str, layer: LogicalLayer) -> Prompt:
-    """질문에 맞는 모델 하나를 고르게 하는 프롬프트."""
+def build_router_prompt(
+    question: str,
+    layer: LogicalLayer,
+    *,
+    graph=None,
+) -> Prompt:
+    """질문에 맞는 모델 하나를 고르게 하는 프롬프트.
+
+    ``graph`` 를 주면 조합 표(부모 둘 이상 참조)를 찾아 카탈로그에서 한 줄로
+    내린다 — OLTP 스키마에서 이것들만 수십 개라 카탈로그의 삼분의 일이
+    넘는 실측이 있다.
+    """
+    compact_relations = None
+    if graph is not None:
+        compact_relations = {
+            m.name: " × ".join(
+                sorted({fk.to_table for fk in graph.outgoing(m.base_table)})[:3]
+            )
+            for m in layer.models
+            if graph.out_degree(m.base_table) >= 2
+        }
     return Prompt(
         cached="\n".join(
             [
                 "아래는 넓은 논리 모델 목록이다. 질문에 답할 수 있는 모델을 "
                 "하나 고른다.",
                 "",
-                render_catalog(layer),
+                render_catalog(layer, compact_relations=compact_relations),
                 "",
                 _ROUTER_RULES,
             ]

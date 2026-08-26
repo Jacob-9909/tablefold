@@ -20,9 +20,7 @@ def test_chat_capability_false_without_keys(monkeypatch):
     def _no_provider(*args, **kwargs):
         raise ProviderUnavailable("OPENAI_API_KEY 가 설정되어 있지 않다")
 
-    monkeypatch.setattr(
-        "tablefold.t2sql.provider.default_completer", _no_provider
-    )
+    monkeypatch.setattr("tablefold.t2sql.provider.default_completer", _no_provider)
     res = client.get("/api/chat-capability")
     assert res.status_code == 200
     assert res.json() == {"llm_available": False}
@@ -122,8 +120,7 @@ def test_expand_response_carries_expansion_warnings():
             "ddl": TWO_CHILDREN_DDL,
             "source": "ddl",
             "sql": (
-                "SELECT order_items_qty_sum, region_order_notes_score_sum "
-                "FROM orders"
+                "SELECT order_items_qty_sum, region_order_notes_score_sum FROM orders"
             ),
         },
     )

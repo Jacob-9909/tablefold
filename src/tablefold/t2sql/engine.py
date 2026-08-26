@@ -305,7 +305,7 @@ class TextToSQLEngine:
 
     def _route(self, question: str, attempts: list[Attempt]) -> LogicalModel | None:
         """카탈로그를 보여 주고 모델 하나를 고르게 한다. 실패하면 ``None``."""
-        prompt = build_router_prompt(question, self.layer)
+        prompt = build_router_prompt(question, self.layer, graph=self.graph)
         LOGGER.info(
             "① 라우팅  모델 %d개 중 하나 · 프롬프트 %s",
             len(self.layer.models),
