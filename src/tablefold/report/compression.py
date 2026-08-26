@@ -18,6 +18,7 @@ _KIND_ORDER = (
     FieldKind.BASE,
     FieldKind.JOINED,
     FieldKind.AGGREGATED,
+    FieldKind.GROUPED,
 )
 
 
@@ -96,7 +97,7 @@ def measure(layer: LogicalLayer) -> dict:
 
 def count_kinds(model) -> dict[str, int]:
     """모델의 필드를 네 통(桶)으로 세어 돌려준다."""
-    out = {"base": 0, "joined": 0, "aggregated": 0, "filter": 0}
+    out = {"base": 0, "joined": 0, "aggregated": 0, "filter": 0, "grouped": 0}
     for f in model.fields:
         out[_bucket(f)] += 1
     return out

@@ -11,6 +11,7 @@ import sqlite3
 
 import pytest
 
+from tablefold.choose.cluster import SelectionPolicy
 from tablefold.ir import (
     FieldKind,
     FieldSource,
@@ -29,6 +30,7 @@ from tablefold.relate.equivalence import (
 )
 from tablefold.relate.synthesize import add_monthly_summaries
 from tablefold.report.information import measure
+from tablefold.rewrite.expand import expand
 from tablefold.t2sql.prepare import prepare_for_questions
 
 
@@ -581,3 +583,143 @@ def test_prepare_suppresses_summaries_for_snapshot_ledgers():
 
 def _excluded(reports):
     return frozenset(r.virtual.name for r in reports if r.snapshot_like)
+
+
+# ── 관계 축 (GROUPED) ─────────────────────────────────────────────────────────
+
+
+def _link_schema() -> PhysicalSchema:
+    orders = PhysicalTable(
+        name="orders",
+        columns=(
+            col("order_id"),
+            col("region_cd", "varchar"),
+            col("amount", "numeric"),
+        ),
+        primary_key=("order_id",),
+    )
+    customers = PhysicalTable(
+        name="customers",
+        columns=(col("customer_id"), col("name", "varchar")),
+        primary_key=("customer_id",),
+    )
+    link = PhysicalTable(
+        name="order_customer_links",
+        columns=(
+            col("link_id"),
+            col("order_id"),
+            col("customer_id"),
+        ),
+        primary_key=("link_id",),
+    )
+    return PhysicalSchema(
+        tables=(orders, customers, link),
+        foreign_keys=(
+            ForeignKey("order_customer_links", ("order_id",), "orders", ("order_id",)),
+            ForeignKey(
+                "order_customer_links", ("customer_id",), "customers", ("customer_id",)
+            ),
+        ),
+    )
+
+
+def test_groupable_children_are_only_made_when_asked():
+
+    schema = _link_schema()
+
+    from tablefold.choose.select import ExplicitSelector
+    from tablefold.fold import fold
+
+    anchors = ExplicitSelector(
+        ("orders", "customers", "order_customer_links"),
+        prune_redundant=False,
+    )
+    off = fold(
+        schema,
+        selector=anchors,
+        policy=SelectionPolicy(max_areas=3),
+        field_budget=10_000,
+        include_aggregates=True,
+        prefix_joined_fields=False,
+        infer_missing_keys=False,
+    ).layer
+    on = fold(
+        schema,
+        selector=anchors,
+        policy=SelectionPolicy(max_areas=3),
+        field_budget=10_000,
+        include_aggregates=True,
+        prefix_joined_fields=False,
+        expose_groupable_children=True,
+        infer_missing_keys=False,
+    ).layer
+
+    assert not any(
+        f.source.kind.value == "grouped" for m in off.models for f in m.fields
+    )
+    grouped = [
+        f for m in on.models for f in m.fields if f.source.kind.value == "grouped"
+    ]
+    names = {f.name.split("_")[-1] for f in grouped}
+    assert "name" in names  # 반대편(고객)의 라벨 컬럼이 축으로 나온다
+
+
+def test_grouped_axis_answers_pair_questions_with_correct_counts():
+    """관계 축으로 묶으면 조인이 다시 짜지고 개수는 DISTINCT 부모 기준이다.
+
+    sqlite 로 실행해 값까지 확인한다 — 구조만 맞고 값이 틀리면 의미가 없다.
+    """
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE orders (
+            order_id INTEGER PRIMARY KEY, region_cd TEXT, amount NUMERIC);
+        CREATE TABLE customers (customer_id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE order_customer_links (
+            link_id INTEGER PRIMARY KEY, order_id INTEGER, customer_id INTEGER);
+        INSERT INTO orders VALUES (1,'R1',100),(2,'R1',200),(3,'R2',300);
+        INSERT INTO customers VALUES (10,'철수'),(20,'영희');
+        -- 주문 1→철수, 주문 2→철수, 주문 3→영희
+        INSERT INTO order_customer_links VALUES (1,1,10),(2,2,10),(3,3,20);
+        """
+    )
+    from tablefold.choose.select import ExplicitSelector
+    from tablefold.fold import fold
+
+    schema = _link_schema()
+    result = fold(
+        schema,
+        selector=ExplicitSelector(
+            ("orders", "customers", "order_customer_links"), prune_redundant=False
+        ),
+        policy=SelectionPolicy(max_areas=3),
+        field_budget=10_000,
+        include_aggregates=True,
+        prefix_joined_fields=False,
+        expose_groupable_children=True,
+        infer_missing_keys=False,
+    )
+    layer, graph = result.layer, result.graph
+
+    model = next(m for m in layer.models if m.name == "orders")
+    grouped = [f.name for f in model.fields if f.source.kind.value == "grouped"]
+    name_field = next(n for n in grouped if n.endswith("_name"))
+    count_field = next(n for n in grouped if n.endswith("_count"))
+
+    expansion = expand(
+        f"SELECT {name_field}, {count_field} FROM orders GROUP BY {name_field}",
+        layer,
+        graph,
+        dialect="sqlite",
+        pretty=False,
+    )
+
+    sql = expansion.sql.replace('"', "")
+    rows = conn.execute(sql).fetchall()
+    by_name = {r[0]: r[1] for r in rows}
+
+    # 주문 2건이 철수로, 1건이 영희로 — DISTINCT 부모 기준이라 중복 없이 정확.
+    assert by_name["철수"] == 2
+    assert by_name["영희"] == 1
+    conn.close()

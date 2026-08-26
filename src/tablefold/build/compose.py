@@ -26,6 +26,7 @@ from dataclasses import dataclass, replace
 from tablefold.choose.cluster import Clustering
 from tablefold.relate.graph import SchemaGraph
 from tablefold.choose.cost import (
+    is_noise,
     DEFAULT_FIELD_BUDGET,
     NUMERIC_AGGREGATES,
     aggregatable_columns,
@@ -86,6 +87,12 @@ class ComposeOptions:
     include_aggregates: bool = True
 
     expose_child_filters: bool = False
+    expose_groupable_children: bool = False
+    """조합 표(부모 둘을 잇는 연결표)를 관계 축(``GROUPED``)으로 노출한다.
+
+    켜면 연결표를 앵커로 세우지 않고도 "반대편 부모별 나열·묶음" 질문이 답긴다.
+    확장기가 조인 재구성과 행 곱셈 방어를 맡는다.
+    """
     """집계된 자식의 원본 컬럼을 필터 전용 필드로 노출할지.
 
     사전집계된 값에는 기간을 걸 수 없다 — ``SUM(SALES_AMT)`` 은 이미 전 기간을
@@ -389,6 +396,82 @@ def _aggregated_fields(
 
     if opts.expose_child_filters:
         fields.extend(_filter_fields(table, step, graph, measures, prefix))
+    if opts.expose_groupable_children:
+        # 조합 표(두 부모를 잇는 연결표)는 앵커로 세우지 않고 양쪽 부모에
+        # **관계 축** 으로 접힌다. ``GROUPED`` 필드는 SELECT/GROUP BY 가 되는
+        # 유일한 1:N 통로다 — 확장기가 조인을 다시 짜고 COUNT(DISTINCT) 로
+        # 행 곱셈을 막는다(:mod:`tablefold.rewrite.expand`).
+        fields.extend(_groupable_fields(table, step, graph))
+    return fields
+
+
+def _groupable_fields(
+    table: PhysicalTable, step: JoinStep, graph: SchemaGraph
+) -> list[LogicalField]:
+    """연결표가 가리키는 *반대편 부모*의 컬럼을 관계 축으로 노출한다.
+
+    연결표 자체의 속성은 이미 집계/필터 통로가 있으므로 여기서 다루지 않는다.
+    노출 대상은 반대편 표의 기본 키와 첫 문자열 컬럼뿐이다 — 나열과 묶음에
+    필요한 최소치다. 대상이 없으면(자식이 부모만 참조) 만들 것이 없다.
+    """
+    prefix = plural(table.name)
+    fields: list[LogicalField] = []
+
+    # DISTINCT 부모 개수. 관계 축 질의에서 ``COUNT(*)`` 는 자식 행 복제 때문에
+    # 금지되므로, 안전한 개수 셈은 이 필드 하나로 제공한다.
+    fields.append(
+        LogicalField(
+            name=f"{prefix}_{step.from_columns[0].lower()}_count",
+            type="bigint",
+            source=FieldSource(
+                kind=FieldKind.GROUPED,
+                table=table.name,
+                column=step.from_columns[0],
+                path=(step,),
+                aggregate="count_distinct",
+            ),
+            description=(
+                f"Number of distinct {_table_label(graph.schema.table(step.from_table)) or step.from_table} "
+                "rows for each grouped relation."
+            ),
+        )
+    )
+
+    for fk in graph.outgoing(table.name):
+        target = graph.schema.table(fk.to_table)
+        if target is None or fk.to_table.lower() == step.from_table.lower():
+            continue
+        forward = JoinStep(
+            from_table=table.name,
+            from_columns=fk.from_columns,
+            to_table=fk.to_table,
+            to_columns=fk.to_columns or target.primary_key,
+            cardinality=Cardinality.MANY_TO_ONE,
+        )
+        exposed = [
+            c.name
+            for c in target.columns
+            if c.name.lower() in {p.lower() for p in target.primary_key}
+            or (c.is_textual and not is_noise(c.name))
+        ][:3]
+        for column in exposed:
+            real = target.column(column)
+            fields.append(
+                LogicalField(
+                    name=f"{prefix}_{column}",
+                    type=real.type if real else "text",
+                    source=FieldSource(
+                        kind=FieldKind.GROUPED,
+                        table=target.name,
+                        column=column,
+                        path=(step, forward),
+                    ),
+                    description=(
+                        f"{_table_label(target) or target.name} 의 {column} — "
+                        f"{prefix} 관계를 따라 묶거나 나열할 수 있다."
+                    ),
+                )
+            )
     return fields
 
 

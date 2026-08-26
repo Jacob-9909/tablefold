@@ -187,6 +187,17 @@ class FieldKind(StrEnum):
     AGGREGATED = "aggregated"
     """A one-to-many child column collapsed by an aggregate function."""
 
+    GROUPED = "grouped"
+    """자식(1:N)을 한 번 거쳐 닿는 대상의 컬럼 — SELECT/GROUP BY 만 허용.
+
+    조합 표(``주문×고객`` 연결표)를 부모 모델에 흡수할 때 쓴다. 흡수하면 자식이
+    행을 여러 개로 만들므로 부모 측정값과 나란히 놓으면 합계가 부풀고, 그래서
+    예전에는 ``filter_only`` 로 강등해 버렸다 — 그러면 "고객별 주문 나열" 같은
+    묶음 질문이 죽는다. ``GROUPED`` 는 세 번째 길이다: 확장기가 이 필드를 만나면
+    자식 조인을 다시 짜고, 함께 쓰인 ``COUNT(*)`` 를 ``COUNT(DISTINCT 부모키)``
+    로 바꿔 행 곱셈을 무력화한다. 부모 측정값과의 혼용은 거부한다(시끄럽게).
+    """
+
 
 @dataclass(frozen=True)
 class FieldSource:

@@ -685,6 +685,10 @@ def _build_model_select(
     pushed: dict[tuple[str, str], list[tuple[exp.Expression, LogicalField]]]
     | None = None,
 ) -> tuple[exp.Select, int]:
+    grouped = [f for f in fields if f.source.kind is FieldKind.GROUPED]
+    if grouped:
+        return _build_grouped_select(model, graph, fields, grouped)
+
     base = graph.schema.table(model.base_table)
     if base is None:
         raise ExpansionError(f"base table '{model.base_table}' is not in the schema")
@@ -812,6 +816,139 @@ def _coverage_warnings(
         f"범위가 다릅니다 ({detail}). 이들을 나란히 비교하면 한쪽이 더 넓은 "
         "집계일 수 있습니다."
     ]
+
+
+def _build_grouped_select(
+    model: LogicalModel,
+    graph: SchemaGraph,
+    fields: tuple[LogicalField, ...],
+    grouped: list[LogicalField],
+) -> tuple[exp.Select, int]:
+    """관계 축(``GROUPED``) 필드만의 질의를 **그룹화된 CTE** 로 만든다.
+
+    계약이 일반 모델과 다르다:
+
+    * 자식(1:N 홉)에 INNER 조인하고, 이어지는 N:1 홉은 LEFT 로 붙인다.
+    * ``COUNT(*)`` 는 여기서 의미가 없다 — 자식 행마다 부모가 복제된 상태다.
+      대신 ``COUNT(DISTINCT 부모키)`` 를 쓴다. 부모 측정값(SUM 등)과 나란히
+      쓰면 합계가 부풀므로 **거부**한다 — 조용히 틀리는 것보다 시끄럽게.
+    * 서로 다른 자식을 동시에 묶으면 자식끼리 곱집합이 생긴다 — 거부.
+    """
+    if len({f.source.path[0].to_table.lower() for f in grouped}) > 1:
+        raise ExpansionError(
+            "query groups through more than one child table "
+            f"({', '.join(sorted({f.source.path[0].to_table for f in grouped}))}); "
+            "서로 다른 자식을 같은 질의에서 묶으면 두 자식이 서로를 곱합니다 — "
+            "질문을 나눠 주세요."
+        )
+
+    base = graph.schema.table(model.base_table)
+    if base is None:
+        raise ExpansionError(f"base table '{model.base_table}' is not in the schema")
+
+    # 안전 검사: 그룹 축과 함께 측정값(BASE 수치·집계 필드)이 오면 행 곱셈으로
+    # 합계가 부풀다. 키 컬럼은 곱셈과 무관하므로 허용한다.
+    base_keys = {c.lower() for c in base.primary_key}
+    for f in fields:
+        if f.source.kind is FieldKind.GROUPED:
+            continue
+        if f.source.kind is FieldKind.AGGREGATED:
+            raise ExpansionError(
+                f"cannot mix grouped fields with aggregates ({f.name}); "
+                "관계 축으로 묶으면 부모 행이 자식 수만큼 복제됩니다 — 측정값은 "
+                "별도 질의로 물어보세요."
+            )
+        if (
+            f.source.kind is FieldKind.BASE
+            and f.source.column.lower() not in base_keys
+            and any(
+                c.name.lower() == f.source.column.lower() and c.is_numeric
+                for c in base.columns
+            )
+        ):
+            raise ExpansionError(
+                f"cannot project numeric column {f.name} while grouping through "
+                "a child; 관계 축 질의에서는 부모 수치 대신 "
+                "COUNT(DISTINCT ...) 형태의 개수만 안전합니다."
+            )
+
+    axis = [f for f in grouped if f.source.aggregate is None]
+    counts = [f for f in grouped if f.source.aggregate == "count_distinct"]
+
+    step = grouped[0].source.path[0]
+    child_alias = "tf_link"
+    joins = 1
+
+    select = exp.select().from_(
+        exp.alias_(_physical(model.base_table, graph), _BASE_ALIAS, table=True)
+    )
+    on = _conjunction(
+        [
+            exp.EQ(
+                this=_column(child_alias, child_col),
+                expression=_column(_BASE_ALIAS, parent_col),
+            )
+            for child_col, parent_col in zip(
+                step.to_columns, step.from_columns, strict=True
+            )
+        ]
+    )
+    select = select.join(
+        exp.alias_(_physical(step.to_table, graph), child_alias, table=True),
+        on=on,
+        join_type="INNER",
+    )
+
+    projections: list[exp.Expression] = []
+    group_exprs: list[exp.Expression] = []
+
+    # 축 필드만 프로젝션·GROUP BY 에 들어간다. count_distinct 는 집계라 별도.
+    for f in sorted(axis, key=lambda x: x.name):
+        hops = f.source.path
+        # 첫 관계축 홉 다음부터는 자식(tf_link)에서 이어진다.
+        prev_alias = child_alias
+        for i, hop in enumerate(hops[1:], start=1):
+            alias = f"{child_alias}_h{i}"
+            condition = _conjunction(
+                [
+                    exp.EQ(
+                        this=_column(alias, to_c),
+                        expression=_column(prev_alias, from_c),
+                    )
+                    for from_c, to_c in zip(
+                        hop.from_columns, hop.to_columns, strict=True
+                    )
+                ]
+            )
+            select = select.join(
+                exp.alias_(_physical(hop.to_table, graph), alias, table=True),
+                on=condition,
+                join_type="LEFT",
+            )
+            joins += 1
+            prev_alias = alias
+
+        target_alias = prev_alias if len(hops) > 1 else child_alias
+        proj = _aliased(_column(target_alias, f.source.column), f.name)
+        projections.append(proj)
+        group_exprs.append(_column(target_alias, f.source.column))
+
+    for count_field in counts:
+        pk = base.primary_key or (base.column_names[0],)
+        projections.append(
+            _aliased(
+                exp.Count(this=exp.Distinct(expressions=[_column(_BASE_ALIAS, pk[0])])),
+                count_field.name,
+            )
+        )
+
+    if not projections:
+        pk = base.primary_key or (base.column_names[0],)
+        projections.append(_column(child_alias, step.to_columns[0]))
+        group_exprs.append(_column(child_alias, step.to_columns[0]))
+
+    select = select.select(*projections).group_by(*group_exprs)
+    return select, joins
 
 
 def _physical(table_name: str, graph: SchemaGraph) -> exp.Table:

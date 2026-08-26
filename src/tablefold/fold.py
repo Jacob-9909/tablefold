@@ -62,6 +62,7 @@ def fold(
     include_aggregates: bool = True,
     prefix_joined_fields: bool = True,
     expose_child_filters: bool = False,
+    expose_groupable_children: bool = False,
     field_bits: dict[tuple[str, str], float] | None = None,
 ) -> FoldResult:
     """Fold a physical schema into as few wide logical models as ``policy`` allows.
@@ -117,6 +118,7 @@ def fold(
             include_aggregates=include_aggregates,
             prefix_joined_fields=prefix_joined_fields,
             expose_child_filters=expose_child_filters,
+            expose_groupable_children=expose_groupable_children,
             field_bits=field_bits,
         ),
     )

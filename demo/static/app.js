@@ -25,6 +25,10 @@ const KIND = {
     label: "조건에만 쓰는 항목",
     help: "위 합계에 기간·구분 같은 조건을 걸 때만 씁니다. 값으로 꺼낼 수는 없습니다.",
   },
+  grouped: {
+    label: "관계 축",
+    help: "두 대상의 관계를 묶거나 나열할 때 쓰는 통로입니다. 조인이 필요하면 확장기가 다시 짓습니다.",
+  },
 };
 
 const num = (n) => Number(n).toLocaleString("ko-KR");
@@ -801,7 +805,7 @@ function kindOf(f) {
 }
 
 function countKinds(fields) {
-  const out = { base: 0, joined: 0, aggregated: 0, filter: 0 };
+  const out = { base: 0, joined: 0, aggregated: 0, filter: 0, grouped: 0 };
   fields.forEach((f) => {
     out[kindOf(f)] = (out[kindOf(f)] || 0) + 1;
   });

@@ -150,6 +150,7 @@ def fold_star_schema(
     prompt_budget: int | None = None,
     max_model_fields: int = STAR_MAX_MODEL_FIELDS,
     field_bits: dict[tuple[str, str], float] | None = None,
+    expose_groupable_children: bool = False,
 ) -> FoldResult:
     """팩트와 차원을 모두 앵커로 두고, 아무것도 새로 사지 않는 앵커만 뺀다.
 
@@ -193,6 +194,7 @@ def fold_star_schema(
         max_model_fields=max_model_fields,
         infer_missing_keys=infer_missing_keys,
         include_aggregates=True,
+        expose_groupable_children=expose_groupable_children,
         # 사전집계된 값에 기간·계정 조건을 걸 통로. 이게 없으면 "이번 달 매출"을
         # 물을 수단이 없다.
         expose_child_filters=True,
