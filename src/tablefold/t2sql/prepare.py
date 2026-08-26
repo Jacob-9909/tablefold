@@ -104,6 +104,7 @@ def prepare_for_questions(
     monthly_summaries: bool = False,
     dedupe_equivalents: bool = False,
     measure_cardinality: bool = False,
+    expose_groupable_children: bool = False,
 ) -> Preparation:
     """질문에 답할 수 있게 접는다.
 
@@ -198,6 +199,7 @@ def prepare_for_questions(
         prompt_budget=prompt_budget,
         infer_missing_keys=False,
         field_bits=field_bits,
+        expose_groupable_children=expose_groupable_children,
     )
 
     if dedupe_equivalents and cursor is not None:

@@ -723,3 +723,19 @@ def test_grouped_axis_answers_pair_questions_with_correct_counts():
     assert by_name["철수"] == 2
     assert by_name["영희"] == 1
     conn.close()
+
+
+def test_prepare_passes_the_groupable_flag_through():
+    """플래그가 prepare까지 온전히 전달되는지 — 전달 누락은 두 번 실제로 있었다."""
+    from tablefold.t2sql.prepare import prepare_for_questions as prep_fn
+
+    schema = _link_schema()
+
+    on = prep_fn(schema, expose_groupable_children=True).result.layer
+    off = prep_fn(schema).result.layer
+
+    on_names = [m.name for m in on.models]
+    assert "order_customer_links" not in on_names  # 조합표 앵커 제외
+    assert any(f.source.kind.value == "grouped" for m in on.models for f in m.fields)
+    # 꺼짐: 조합표가 여전히 앵커다 (답변 가능성 100% 기본값 유지)
+    assert "order_customer_links" in {m.name for m in off.models}

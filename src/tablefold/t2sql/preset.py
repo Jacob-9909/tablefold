@@ -170,6 +170,14 @@ def fold_star_schema(
     dimensions, facts = split_anchors(graph)
     anchors = facts + dimensions
 
+    if expose_groupable_children:
+        # 관계 축(GROUPED)이 켜졌으면 조합 표는 앵커에서 뺀다. 두 부모를 잇는
+        # 연결표의 질문은 이제 양쪽 부모 모델의 관계 축으로 답긴다 — OLTP 스키마
+        # 에서 이것만으로 수십 개의 모델이 사라진다.
+        anchors = (
+            tuple(name for name in anchors if graph.out_degree(name) < 2) or anchors
+        )
+
     if not anchors:
         return fold(
             schema,
