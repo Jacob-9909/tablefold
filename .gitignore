@@ -33,3 +33,6 @@ htmlcov/
 # Working documents — reports and spreadsheets, not code
 *.xlsx
 goldset_integration_test_report.md
+
+# External sample databases — downloaded on demand, not committed
+/fixtures/external/
