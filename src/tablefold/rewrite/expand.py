@@ -189,6 +189,47 @@ class ExpansionResult:
         return self.joins_available - self.joins_emitted
 
 
+# 사람이 부르는 이름 → sqlglot 이 아는 이름.
+#
+# 이 저장소는 다른 데서 전부 "MSSQL" 이라고 부른다 — ``read/mssql.py``, ``--mssql``
+# 플래그, :func:`~tablefold.t2sql.prepare.dialect_for_live` 의 주석까지. 그런데
+# sqlglot 이 아는 이름은 ``tsql`` 뿐이라, ``--dialect mssql`` 이라는 **가장
+# 자연스러운 입력**이 라이브러리 깊은 곳에서 터졌다:
+#
+#     ValueError: Unknown dialect 'mssql'. Did you mean mysql?
+#
+# 별칭을 받아 주고, 모르는 이름은 여기서 도메인 오류로 세운다.
+_DIALECT_ALIASES = {
+    "mssql": "tsql",
+    "sqlserver": "tsql",
+    "sql_server": "tsql",
+    "postgresql": "postgres",
+    "pg": "postgres",
+}
+
+
+def normalize_dialect(dialect: str) -> str:
+    """방언 이름을 sqlglot 이 받는 형태로 바꾼다. 모르는 이름은 거부한다.
+
+    빈 문자열은 sqlglot 의 기본 방언을 뜻하므로 그대로 통과시킨다 — 호출부에서
+    "안 정했다"는 뜻으로 쓰인다(:data:`~tablefold.t2sql.prepare.GENERIC_DIALECTS`).
+    """
+    from sqlglot.dialects.dialect import Dialect, Dialects
+
+    name = (dialect or "").strip().lower()
+    if not name:
+        return name
+    name = _DIALECT_ALIASES.get(name, name)
+    try:
+        Dialect.get_or_raise(name)
+    except Exception as exc:  # noqa: BLE001 — 도메인 오류로 올린다
+        known = ", ".join(sorted(d.value for d in Dialects if d.value))
+        raise ExpansionError(
+            f"unknown SQL dialect {dialect!r}; known dialects: {known}"
+        ) from exc
+    return name
+
+
 def expand(
     sql: str,
     layer: LogicalLayer,
@@ -200,6 +241,7 @@ def expand(
     """논리 모델을 참조하는 *sql*을
     실제 물리 테이블 대상 구문으로 다시 재작성(Expand)합니다.
     """
+    dialect = normalize_dialect(dialect)
     try:
         statement = sqlglot.parse_one(sql, read=dialect)
     except Exception as exc:  # noqa: BLE001 - surfaced as a domain error
