@@ -36,7 +36,11 @@ MssqlOption = Annotated[
 DsnOption = Annotated[
     str | None,
     typer.Option(
-        "--dsn", help="PostgreSQL connection string (needs the postgres extra)."
+        "--dsn",
+        help=(
+            "Database connection string. PostgreSQL by default (needs the "
+            "postgres extra); prefix with oracle:// for Oracle (oracle extra)."
+        ),
     ),
 ]
 SchemaOption = Annotated[str, typer.Option("--schema", help="Database schema name.")]
@@ -593,9 +597,33 @@ def _load_schema(
             raise typer.Exit(code=2)
         return DDLIntrospector.from_path(ddl).introspect()
 
+    assert dsn is not None
+    return _introspect_dsn(dsn, schema)
+
+
+ORACLE_SCHEMES = ("oracle://", "oracle+oracledb://")
+"""``--dsn`` 이 Oracle 을 뜻한다는 표시.
+
+명령마다 ``--oracle-dsn`` 을 하나씩 더 다는 대신 스킴으로 가른다. ``--dsn`` 을
+받는 명령이 여섯 개라 옵션을 늘리면 여섯 군데가 늘어나고, 늘어난 뒤에는 둘 다
+준 경우를 여섯 군데에서 막아야 한다.
+"""
+
+
+def _introspect_dsn(dsn: str, schema: str) -> PhysicalSchema:
+    for scheme in ORACLE_SCHEMES:
+        if dsn.startswith(scheme):
+            from tablefold.read.oracle import OracleIntrospector
+
+            # ``--schema`` 의 기본값은 Postgres 의 ``public`` 이라 "안 정했다"는
+            # 뜻으로 흘러 들어온다. Oracle 에서 ``PUBLIC`` 은 실재하는 특수
+            # 스키마라 그대로 넘기면 빈 결과가 나온다 — 접속은 됐는데 표가
+            # 하나도 없는 것처럼 보인다. 안 정했으면 접속 계정 스키마를 쓴다.
+            owner = "" if schema == "public" else schema
+            return OracleIntrospector(dsn[len(scheme) :], schema=owner).introspect()
+
     from tablefold.read.postgres import PostgresIntrospector
 
-    assert dsn is not None
     return PostgresIntrospector(dsn, schema=schema).introspect()
 
 

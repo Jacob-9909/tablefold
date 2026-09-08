@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
+oracle = ["oracledb>=2.0"]
 llm = ["anthropic>=0.40"]
 
 [project.scripts]
