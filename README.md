@@ -1,5 +1,7 @@
 # tablefold
 
+[![CI](https://github.com/Jacob-9909/tablefold/actions/workflows/ci.yml/badge.svg)](https://github.com/Jacob-9909/tablefold/actions/workflows/ci.yml)
+
 > 방대한 물리 데이터베이스 스키마를 LLM이 한눈에 이해할 수 있는 소수의 **와이드 논리 모델(Wide Logical Models)**로 접고(Fold), 작성된 쿼리를 실제 실행 가능한 물리 SQL로 다시 펼쳐주는(Expand) 도구입니다.
 
 ```
