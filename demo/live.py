@@ -23,6 +23,7 @@ from tablefold.read.mssql import (
     env_configured,
 )
 from tablefold.relate.validate import DEFAULT_VIOLATION_TOLERANCE, recover_with_data
+from tablefold.report.baseline import schema_ddl
 
 load_dotenv()
 
@@ -61,13 +62,14 @@ def available() -> bool:
 
 
 def render_ddl(schema: PhysicalSchema) -> str:
-    blocks = []
-    for table in schema.tables:
-        lines = [f"  {c.name} {c.type}" for c in table.columns]
-        if table.primary_key:
-            lines.append(f"  PRIMARY KEY ({', '.join(table.primary_key)})")
-        blocks.append(f"CREATE TABLE {table.name} (\n" + ",\n".join(lines) + "\n);")
-    return "\n\n".join(blocks)
+    """화면에 보여 줄 원본 스키마.
+
+    :func:`tablefold.report.baseline.schema_ddl` 한 벌만 쓴다. 여기 있던 판은
+    외래 키와 주석을 빼고 그렸는데, 대조군이 그걸 쓰면 조인 경로를 모르는 채로
+    답하게 되어 접힌 쪽이 이긴 이유가 흐려진다. 화면과 대조군이 같은 것을
+    보게 두는 편이 낫다.
+    """
+    return schema_ddl(schema)
 
 
 def load(schema_name: str = "dbo") -> tuple[PhysicalSchema, dict]:
