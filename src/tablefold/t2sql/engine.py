@@ -52,7 +52,12 @@ from sqlglot import exp
 from tablefold.fold import FoldResult
 from tablefold.ir import LogicalLayer, LogicalModel
 from tablefold.relate.graph import SchemaGraph
-from tablefold.rewrite.expand import ExpansionError, FilterOnlyMisuse, expand
+from tablefold.rewrite.expand import (
+    ExpansionError,
+    FilterOnlyMisuse,
+    expand,
+    normalize_dialect,
+)
 from tablefold.t2sql.parse import SQLNotFound, extract_sql
 from tablefold.t2sql.prompt import (
     Example,
@@ -200,6 +205,11 @@ class TextToSQLEngine:
     ) -> None:
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
+
+        # 여기서 한 번 세워 둔다. 엔진은 :func:`expand` 와 별개로 직접 파싱도
+        # 하므로(:meth:`_parse`), 확장 단계에서만 정규화하면 두 경로가 서로 다른
+        # 방언을 쓰게 된다.
+        dialect = normalize_dialect(dialect)
 
         self.layer: LogicalLayer = fold_result.layer
         self.graph: SchemaGraph = fold_result.graph

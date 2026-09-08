@@ -8,7 +8,7 @@ from tablefold.build.compose import ComposeOptions, compose
 from tablefold.choose.classify import profile_tables
 from tablefold.choose.cluster import SelectionPolicy, cluster
 from tablefold.ir import FieldKind
-from tablefold.rewrite.expand import ExpansionError, expand
+from tablefold.rewrite.expand import ExpansionError, expand, normalize_dialect
 
 
 @pytest.fixture
@@ -360,3 +360,48 @@ def test_a_parenthesized_or_is_still_rejected(filterable_layer, retail_graph):
             filterable_layer,
             retail_graph,
         )
+
+
+# ── 방언 이름 ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("mssql", "tsql"),
+        ("MSSQL", "tsql"),
+        ("SQLServer", "tsql"),
+        ("sql_server", "tsql"),
+        ("postgresql", "postgres"),
+        ("pg", "postgres"),
+        ("tsql", "tsql"),
+        ("oracle", "oracle"),
+        ("  postgres  ", "postgres"),
+        ("", ""),
+    ],
+)
+def test_normalize_dialect_accepts_the_names_people_actually_type(given, expected):
+    assert normalize_dialect(given) == expected
+
+
+def test_normalize_dialect_rejects_an_unknown_name_with_the_list():
+    with pytest.raises(ExpansionError) as excinfo:
+        normalize_dialect("mssqll")
+    message = str(excinfo.value)
+    assert "mssqll" in message
+    assert "tsql" in message  # 무엇을 쓸 수 있는지 함께 말해 준다
+
+
+def test_expand_accepts_mssql_as_a_dialect_name(tiny_layer, tiny_graph):
+    """``--dialect mssql`` 은 가장 자연스러운 입력이면서 예전엔 터졌다.
+
+    sqlglot 이 아는 이름은 ``tsql`` 뿐인데, 이 저장소는 다른 데서 전부 MSSQL
+    이라고 부른다. 라이브러리의 ``ValueError`` 가 그대로 올라오지 않아야 한다.
+    """
+    result = expand(
+        "SELECT id, total FROM orders",
+        tiny_layer,
+        tiny_graph,
+        dialect="mssql",
+    )
+    assert result.sql

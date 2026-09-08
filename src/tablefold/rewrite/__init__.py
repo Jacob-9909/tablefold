@@ -4,6 +4,11 @@
 않는다.
 """
 
-from tablefold.rewrite.expand import ExpansionError, ExpansionResult, expand
+from tablefold.rewrite.expand import (
+    ExpansionError,
+    ExpansionResult,
+    expand,
+    normalize_dialect,
+)
 
-__all__ = ["ExpansionError", "ExpansionResult", "expand"]
+__all__ = ["ExpansionError", "ExpansionResult", "expand", "normalize_dialect"]
