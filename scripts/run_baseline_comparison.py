@@ -16,9 +16,11 @@
     접은 팔   : 원본 스키마 → fold → 논리 SQL → expand → 물리 SQL
     안 접은 팔 : 원본 DDL → 물리 SQL (tablefold 를 지나치지 않는다)
 
-실행에는 라이브 MSSQL 과 LLM 자격 증명이 필요하다.
+실행에는 세 가지가 필요하다. 없으면 :func:`preflight` 가 무엇이 없는지 한 번에
+말하고 멈춘다 — 절반쯤 돌다 터지면 두 팔 중 한쪽만 진행된 상태라, 남은 숫자를
+비교로 쓸 수 있는지 없는지 알 수 없다.
 
-    uv run python scripts/run_baseline_comparison.py
+    uv run python scripts/run_baseline_comparison.py [골드셋.xlsx]
 """
 
 from __future__ import annotations
@@ -49,6 +51,13 @@ from tablefold.t2sql.provider import default_completer  # noqa: E402
 DIALECT = "tsql"
 MAX_ATTEMPTS = 3
 
+DEFAULT_GOLDSET = "20251104_NL2SQL_메뉴별컨텐츠정리.xlsx"
+"""기본 골드셋. **저장소에 들어 있지 않다** — 고객사 데이터라 커밋되지 않는다.
+
+경로를 인자로 넘길 수 있게 둔 이유가 이것이다. 예전에는 이 이름이 코드에 박혀
+있어서, 파일이 없으면 openpyxl 의 ``FileNotFoundError`` 가 그대로 올라왔다.
+"""
+
 # 값이 맞은 것으로 세는 등급. 실행만 된 것은 정답이 아니다.
 CORRECT = {"EXACT_VALUE_MATCH", "CLOSE_VALUE_MATCH"}
 
@@ -71,7 +80,45 @@ def _grade(gold_res: dict, sql: str) -> tuple[str, dict]:
     return status, gen_res
 
 
-def run() -> None:
+def preflight(goldset: Path) -> list[str]:
+    """돌리기 전에 없는 것을 **전부 모아서** 말한다.
+
+    하나씩 터뜨리면 고치고 다시 돌리기를 세 번 반복해야 한다. 한 번에 다 보여
+    주는 편이 낫다 — 특히 이 스크립트는 LLM 을 수백 번 부르므로, 절반쯤 가서
+    멈추면 비용만 쓰고 비교는 못 얻는다.
+    """
+    missing: list[str] = []
+
+    if not goldset.exists():
+        missing.append(
+            f"골드셋 파일이 없다: {goldset}\n"
+            "     저장소에 들어 있지 않다(고객사 데이터). 경로를 인자로 넘겨라:\n"
+            "     uv run python scripts/run_baseline_comparison.py <경로.xlsx>"
+        )
+
+    if not live.available():
+        missing.append(
+            "라이브 MSSQL 에 붙지 못했다.\n"
+            "     .env 의 TABLEFOLD_MSSQL_HOST / PORT / USER / PASSWORD / DB 를 채워라."
+        )
+
+    try:
+        default_completer()
+    except Exception as exc:  # noqa: BLE001 — 여기서는 이유만 모은다
+        missing.append(f"LLM 공급자를 쓸 수 없다: {exc}")
+
+    return missing
+
+
+def run(goldset_path: str = DEFAULT_GOLDSET) -> None:
+    goldset = Path(goldset_path)
+    problems = preflight(goldset)
+    if problems:
+        print("실행 전제조건이 갖춰지지 않았다:\n")
+        for i, problem in enumerate(problems, 1):
+            print(f"  {i}. {problem}")
+        raise SystemExit(1)
+
     schema, meta = live.load()
     db = meta.get("database", "NL2SQL")
     print(f"[schema] {db} — 물리 테이블 {len(schema.tables)}개")
@@ -85,8 +132,8 @@ def run() -> None:
     completer = default_completer()
     print("[baseline] 원본 DDL 을 그대로 프롬프트에 넣는다\n")
 
-    cases = load_goldset("20251104_NL2SQL_메뉴별컨텐츠정리.xlsx")
-    gold_sqls = extract_gold_sqls("20251104_NL2SQL_메뉴별컨텐츠정리.xlsx")
+    cases = load_goldset(str(goldset))
+    gold_sqls = extract_gold_sqls(str(goldset))
 
     folded: list[ArmResult] = []
     unfolded: list[ArmResult] = []
@@ -170,4 +217,4 @@ def _report(folded: list[ArmResult], unfolded: list[ArmResult]) -> None:
 
 
 if __name__ == "__main__":
-    run()
+    run(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_GOLDSET)
